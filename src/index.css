@@ -1,0 +1,19 @@
+@import "tailwindcss";
+
+/* Leaflet 地圖樣式修復 */
+@import "leaflet/dist/leaflet.css";
+
+/* 針對 iOS 滾動優化 */
+html, body {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: none;
+}
+
+/* 隱藏滾動條但保持滾動 */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
