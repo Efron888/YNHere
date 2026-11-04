@@ -1,5 +1,5 @@
-import React from 'react';
-import { Phone, Mail, Share2, Building2, Briefcase } from 'lucide-react';
+import React, { useRef } from 'react';
+import { Phone, Mail, Share2, Building2, Briefcase, Check } from 'lucide-react';
 import { ContactCard } from '../../types/contact';
 
 interface ContactCardItemProps {
@@ -31,8 +31,28 @@ export const ContactCardItem: React.FC<ContactCardItemProps> = ({
   const primaryEmail = contact.emails[0];
   const ribbonInfo = contact.ribbon?.status !== 'none' ? RIBBON_COLOR_MAP[contact.ribbon.status] : null;
 
+  // 手機長按進入選取模式支援
+  const longPressTimer = useRef<NodeJS.Timeout | null>(null);
+
+  const handleTouchStart = () => {
+    longPressTimer.current = setTimeout(() => {
+      onToggleSelect(contact.id);
+      if (navigator.vibrate) navigator.vibrate(50);
+    }, 500);
+  };
+
+  const handleTouchEnd = () => {
+    if (longPressTimer.current) {
+      clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+  };
+
   return (
     <div
+      onTouchStart={handleTouchStart}
+      onTouchEnd={handleTouchEnd}
+      onTouchMove={handleTouchEnd}
       onClick={() => {
         if (isMultiSelectMode) {
           onToggleSelect(contact.id);
@@ -40,7 +60,7 @@ export const ContactCardItem: React.FC<ContactCardItemProps> = ({
           onClickDetail(contact);
         }
       }}
-      className={`group relative bg-white rounded-2xl p-4 border transition-all duration-200 cursor-pointer shadow-xs hover:shadow-md ${
+      className={`group relative bg-white rounded-2xl p-4 border transition-all duration-200 cursor-pointer shadow-xs hover:shadow-md select-none ${
         isSelected
           ? 'border-blue-500 ring-2 ring-blue-500/20 bg-blue-50/20'
           : 'border-slate-200/80 hover:border-blue-300'
@@ -80,20 +100,30 @@ export const ContactCardItem: React.FC<ContactCardItemProps> = ({
 
       {/* 卡片主體區域：右側預留 pr-24 安全留白防止文字遮擋右上角圖示 */}
       <div className="flex items-start space-x-3 pr-24">
-        {/* 多選 Checkbox */}
-        <div className="pt-0.5 flex-shrink-0">
-          <input
-            type="checkbox"
-            checked={isSelected}
-            onChange={(e) => {
-              e.stopPropagation();
-              onToggleSelect(contact.id);
-            }}
-            className={`w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 transition-opacity ${
-              isMultiSelectMode ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+        {/* 多選勾選鈕：獨立 44px 觸控熱區、手機常態可見、杜絕誤觸進入詳情 */}
+        <button
+          type="button"
+          aria-label={isSelected ? `取消選取 ${contact.name}` : `選取 ${contact.name}`}
+          onTouchStart={(e) => e.stopPropagation()}
+          onTouchEnd={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleSelect(contact.id);
+          }}
+          className="p-2.5 -m-2.5 flex-shrink-0 flex items-center justify-center cursor-pointer select-none rounded-xl"
+        >
+          <div
+            className={`w-5 h-5 rounded-md border flex items-center justify-center transition-all ${
+              isSelected
+                ? 'bg-blue-600 border-blue-600 text-white shadow-xs'
+                : isMultiSelectMode
+                ? 'border-blue-400 bg-white ring-2 ring-blue-100'
+                : 'border-slate-300 bg-white/80 hover:border-blue-400 hover:bg-blue-50/50'
             }`}
-          />
-        </div>
+          >
+            {isSelected && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+          </div>
+        </button>
 
         {/* 頭像或名片縮圖 */}
         <div className="w-12 h-12 rounded-xl bg-slate-100 border border-slate-200 overflow-hidden flex-shrink-0 flex items-center justify-center text-slate-600 font-bold text-lg">
@@ -138,7 +168,7 @@ export const ContactCardItem: React.FC<ContactCardItemProps> = ({
       </div>
 
       {/* 標籤膠囊與名片建立時間 */}
-      <div className="mt-2.5 flex items-center justify-between text-[10px] pl-7 flex-wrap gap-1">
+      <div className="mt-2.5 flex items-center justify-between text-[10px] pl-8 flex-wrap gap-1">
         <div className="flex flex-wrap gap-1">
           {contact.tags.map((tag) => (
             <span

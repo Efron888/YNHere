@@ -194,9 +194,11 @@ describe('Google Gemini API 雲端視覺引擎與一勞永逸架構 (Cloud Gemin
     });
     vi.stubGlobal('fetch', mockFetch);
 
-    const parsed = await runCloudGeminiOcr('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'AIzaSyValidKey', 'gemini-future-model');
+    const results = await runCloudGeminiOcr('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'AIzaSyValidKey', 'gemini-future-model');
 
     expect(callCount).toBe(3); // 依序嘗試 v1beta (404) -> v1 (404) -> 備用模型 v1beta (200 成功)
+    expect(results.length).toBe(1);
+    const parsed = results[0];
     expect(parsed.name).toBe('劉景文');
     expect(parsed.nameEn).toBe('Ching-Wen Liu');
     expect(parsed.company).toBe('廣運機械工程股份有限公司');
@@ -204,8 +206,43 @@ describe('Google Gemini API 雲端視覺引擎與一勞永逸架構 (Cloud Gemin
     expect(parsed.jobTitle).toBe('副理');
     expect(parsed.taxId).toBe('04757891');
     expect(parsed.phones.length).toBe(3);
-    expect(parsed.phones.some((p) => p.type === 'fax' && p.number === '02-2788-5170')).toBe(true);
+    expect(parsed.phones.some((p: { type: string; number: string }) => p.type === 'fax' && p.number === '02-2788-5170')).toBe(true);
     expect(parsed.addresses[0]).toBe('11578 台北市南港路二段97號5樓');
+
+    vi.unstubAllGlobals();
+  });
+
+  it('應支援同框多張名片提取（回傳多張名片陣列）', async () => {
+    const { runCloudGeminiOcr } = await import('../src/services/ocr/ocrEngine');
+    const mockMultiFetch = vi.fn().mockImplementation(async () => {
+      return new Response(
+        JSON.stringify({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: JSON.stringify([
+                      { name: '王大明', company: '甲公司', jobTitle: '總經理', phones: [{ type: 'mobile', number: '0912345678' }] },
+                      { name: '李小美', company: '乙公司', jobTitle: '行銷總監', phones: [{ type: 'mobile', number: '0987654321' }] },
+                    ]),
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        { status: 200 }
+      );
+    });
+    vi.stubGlobal('fetch', mockMultiFetch);
+
+    const cards = await runCloudGeminiOcr('data:image/png;base64,abc', 'AIzaSyValidKey');
+    expect(cards.length).toBe(2);
+    expect(cards[0].name).toBe('王大明');
+    expect(cards[0].jobTitle).toBe('總經理');
+    expect(cards[1].name).toBe('李小美');
+    expect(cards[1].jobTitle).toBe('行銷總監');
 
     vi.unstubAllGlobals();
   });

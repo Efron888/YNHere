@@ -14,6 +14,7 @@ import { MyDigitalCardView } from './components/mycard/MyDigitalCardView';
 import { ContactMapView } from './components/map/ContactMapView';
 import { recognizeBusinessCard } from './services/ocr/ocrEngine';
 import { getMyStandaloneProfile, saveMyStandaloneProfile } from './services/profile/profileService';
+import { mergeContacts } from './services/deduplication/duplicateMatcher';
 import {
   Search,
   CheckSquare,
@@ -30,6 +31,7 @@ import {
   Sparkles,
   RotateCw,
   Settings,
+  GitMerge,
 } from 'lucide-react';
 
 export function App() {
@@ -142,7 +144,7 @@ export function App() {
     return Array.from(set);
   }, [contacts]);
 
-  // 多選切換
+  // 多選切換 (選中自動啟用多選模式，清空自動關閉)
   const toggleSelect = (id: string) => {
     const next = new Set(selectedIds);
     if (next.has(id)) {
@@ -151,13 +153,16 @@ export function App() {
       next.add(id);
     }
     setSelectedIds(next);
+    setIsMultiSelectMode(next.size > 0);
   };
 
   const handleSelectAll = () => {
     if (selectedIds.size === filteredContacts.length) {
       setSelectedIds(new Set());
+      setIsMultiSelectMode(false);
     } else {
       setSelectedIds(new Set(filteredContacts.map((c) => c.id)));
+      setIsMultiSelectMode(true);
     }
   };
 
@@ -170,6 +175,39 @@ export function App() {
       setIsMultiSelectMode(false);
       await loadContactsFromDb();
     }
+  };
+
+  // 智慧合併所選取的多張名片 (問題 3 徹底解決)
+  const handleMergeSelected = async () => {
+    if (selectedIds.size < 2) return;
+    const selectedList = contacts.filter((c) => selectedIds.has(c.id));
+    if (selectedList.length < 2) return;
+
+    if (
+      !window.confirm(
+        `確定要將選取的 ${selectedList.length} 張名片智慧合併為 1 張嗎？\n\n主體：${selectedList[0].name} (${selectedList[0].company || '無公司'})\n其餘名片的舊職位與通訊資訊將自動歸檔整合至職涯履歷時間軸。`
+      )
+    ) {
+      return;
+    }
+
+    let merged = selectedList[0];
+    const idsToDelete: string[] = [];
+
+    for (let i = 1; i < selectedList.length; i++) {
+      merged = mergeContacts(merged, selectedList[i]);
+      idsToDelete.push(selectedList[i].id);
+    }
+
+    await db.contacts.put(merged);
+    if (idsToDelete.length > 0) {
+      await db.contacts.bulkDelete(idsToDelete);
+    }
+
+    setSelectedIds(new Set());
+    setIsMultiSelectMode(false);
+    await loadContactsFromDb();
+    alert(`已成功合併為 1 張名片，並已自動保留職涯歷史！`);
   };
 
   // 儲存/更新聯絡人 (自動分流：個人代表名片獨立儲存，絕不污染人脈庫)
@@ -567,6 +605,19 @@ export function App() {
             {selectedIds.size === filteredContacts.length ? '取消全選' : '一鍵全選'}
           </button>
           <div className="h-4 w-px bg-slate-700" />
+          {selectedIds.size >= 2 && (
+            <>
+              <button
+                onClick={handleMergeSelected}
+                className="flex items-center space-x-1 text-amber-300 hover:text-amber-200 font-semibold"
+                title="智慧合併所選名片"
+              >
+                <GitMerge className="w-3.5 h-3.5" />
+                <span>合併名片</span>
+              </button>
+              <div className="h-4 w-px bg-slate-700" />
+            </>
+          )}
           <button
             onClick={() => setIsExchangeOpen(true)}
             disabled={selectedIds.size === 0}

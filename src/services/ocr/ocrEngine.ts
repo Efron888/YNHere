@@ -489,13 +489,13 @@ export async function testGeminiApiKey(
 }
 
 /**
- * 引擎 B: 雲端多模態視覺 AI (支援自訂/動態 Gemini 模型與容錯 Cascade)
+ * 引擎 B: 雲端多模態視覺 AI (支援自訂/動態 Gemini 模型、同框多名片辨識與容錯 Cascade)
  */
 export async function runCloudGeminiOcr(
   imageBase64: string,
   apiKey: string,
   preferredModel?: string
-): Promise<ParsedCardFields> {
+): Promise<ParsedCardFields[]> {
   const cleanKey = apiKey.trim().replace(/^['"]|['"]$/g, '');
   if (!cleanKey) throw new Error('未提供有效的 Google Gemini API Key');
 
@@ -515,24 +515,28 @@ export async function runCloudGeminiOcr(
     throw new Error('名片圖片資料為空，無法進行雲端 AI 視覺辨識');
   }
 
-  const prompt = `你是一位頂尖的名片資訊提取與 OCR 校正專家。請仔細辨識這張名片影像中的文字，並直接輸出為符合以下 JSON 格式的資料：
-{
-  "name": "中文姓名或主要姓名(必填)",
-  "nameEn": "英文名(若有則填，無則為空字串)",
-  "company": "公司完整官方名稱(如 股份有限公司/有限公司)",
-  "department": "部門名稱(若有)",
-  "jobTitle": "職稱(例如 副理、總監、經理等)",
-  "taxId": "8碼統一編號字串，若開頭為0(如 04757891)必須完整保留0不可吃掉(無則留空字串)",
-  "phones": [
-    { "type": "work" | "mobile" | "fax", "number": "電話號碼(純號碼不含分機)", "extension": "分機號碼(純數字若無留空)" }
-  ],
-  "emails": ["電子郵件信箱"],
-  "websites": ["公司官方網址"],
-  "addresses": ["完整地址(包含郵遞區號)"]
-}
-特別注意事項：
-1. 嚴格輸出單純的 JSON 物件，嚴禁包含 Markdown 代碼區塊標記（如 \`\`\`json）或任何額外說明文字。
-2. 若為雙欄版面或金屬拉絲材質名片，請仔細比對各欄位，提取正確的人名、職稱與通訊電話。`;
+  const prompt = `你是一位頂尖的名片資訊提取與 OCR 校正專家。請仔細辨識影像中的名片文字，並直接輸出為符合以下 JSON 格式的資料：
+特別注意多張名片同框：
+1. 若影像中包含「多張不同名片」（例如 2~4 張並排或擺放在桌面），請為每一張名片輸出一個獨立的物件，回傳 JSON 陣列：
+[
+  {
+    "name": "中文姓名或主要姓名(必填)",
+    "nameEn": "英文名(若有則填，無則為空字串)",
+    "company": "公司完整官方名稱(如 股份有限公司/有限公司)",
+    "department": "部門名稱(若有)",
+    "jobTitle": "職稱(例如 副理、總監、經理等)",
+    "taxId": "8碼統一編號字串，若開頭為0(如 04757891)必須完整保留0不可吃掉(無則留空字串)",
+    "phones": [
+      { "type": "work" | "mobile" | "fax", "number": "電話號碼(純號碼不含分機)", "extension": "分機號碼(純數字若無留空)" }
+    ],
+    "emails": ["電子郵件信箱"],
+    "websites": ["公司官方網址"],
+    "addresses": ["完整地址(包含郵遞區號)"]
+  }
+]
+2. 若影像中只有一張名片，輸出單一物件或包含該物件的陣列。
+3. 嚴禁包含 Markdown 代碼區塊標記（如 \`\`\`json）或任何額外說明文字。
+4. 若為雙欄版面或金屬拉絲材質名片，請仔細比對各欄位，提取正確的人名、職稱與通訊電話。`;
 
   // 一勞永逸模型候選清單：優先從使用者帳號同步之可用模型中挑選真實存在的 flash/pro 模型
   const currentSettings = getOcrSettings();
@@ -622,40 +626,45 @@ export async function runCloudGeminiOcr(
         // 清理可能出現的 markdown 格式包裹
         textOutput = textOutput.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
 
-        const parsed = JSON.parse(textOutput);
-        const normalizedPhones = Array.isArray(parsed.phones)
-          ? parsed.phones
-              .map((p: { type?: 'mobile' | 'work' | 'fax'; number?: string; extension?: string }) => {
-                let rawNum = String(p?.number || '').trim();
-                let ext = String(p?.extension || '').trim();
-                // 若 number 內含 ext/分機 抽取出來
-                const matchExt = rawNum.match(/(?:ext\.?|#|分機|轉)\s*(\d{1,6})/i);
-                if (matchExt) {
-                  if (!ext) ext = matchExt[1];
-                  rawNum = rawNum.replace(matchExt[0], '').trim();
-                }
-                const item = normalizePhone(rawNum, p?.type || 'work');
-                if (ext) {
-                  item.extension = ext;
-                  item.normalizedDialString = `${item.number},${ext}`;
-                }
-                return item;
-              })
-              .filter((p: { number: string }) => Boolean(p.number))
-          : [];
+        const rawParsed = JSON.parse(textOutput);
+        const parsedItems = Array.isArray(rawParsed) ? rawParsed : [rawParsed];
 
-        return {
-          name: parsed.name || '未命名聯絡人',
-          nameEn: parsed.nameEn || '',
-          company: parsed.company || '',
-          department: parsed.department || '',
-          jobTitle: parsed.jobTitle || '',
-          taxId: normalizeTaiwanTaxId(parsed.taxId || ''),
-          phones: normalizedPhones,
-          emails: Array.isArray(parsed.emails) ? parsed.emails : [],
-          websites: Array.isArray(parsed.websites) ? parsed.websites : [],
-          addresses: Array.isArray(parsed.addresses) ? parsed.addresses : [],
-        };
+        const results: ParsedCardFields[] = parsedItems.map((item) => {
+          const normalizedPhones = Array.isArray(item?.phones)
+            ? item.phones
+                .map((p: { type?: 'mobile' | 'work' | 'fax'; number?: string; extension?: string }) => {
+                  let rawNum = String(p?.number || '').trim();
+                  let ext = String(p?.extension || '').trim();
+                  const matchExt = rawNum.match(/(?:ext\.?|#|分機|轉)\s*(\d{1,6})/i);
+                  if (matchExt) {
+                    if (!ext) ext = matchExt[1];
+                    rawNum = rawNum.replace(matchExt[0], '').trim();
+                  }
+                  const phoneItem = normalizePhone(rawNum, p?.type || 'work');
+                  if (ext) {
+                    phoneItem.extension = ext;
+                    phoneItem.normalizedDialString = `${phoneItem.number},${ext}`;
+                  }
+                  return phoneItem;
+                })
+                .filter((p: { number: string }) => Boolean(p.number))
+            : [];
+
+          return {
+            name: item?.name || '未命名聯絡人',
+            nameEn: item?.nameEn || '',
+            company: item?.company || '',
+            department: item?.department || '',
+            jobTitle: item?.jobTitle || '',
+            taxId: normalizeTaiwanTaxId(item?.taxId || ''),
+            phones: normalizedPhones,
+            emails: Array.isArray(item?.emails) ? item.emails : [],
+            websites: Array.isArray(item?.websites) ? item.websites : [],
+            addresses: Array.isArray(item?.addresses) ? item.addresses : [],
+          };
+        });
+
+        return results;
       } catch (err: unknown) {
         lastError = err instanceof Error ? err : new Error(String(err));
         // 只要是驗證或權限等致命錯誤，直接拋出
@@ -683,16 +692,16 @@ async function blobToDataUrl(blob: Blob): Promise<string> {
 }
 
 /**
- * 智慧辨識主入口：依設定調用引擎 A 或 B，並轉換為 ContactCard 實體
+ * 智慧辨識主入口（多名片同框支援）：依設定調用引擎 A 或 B，並轉換為 ContactCard 實體陣列
  * 遵守 Fail Fast 原則：若使用者選取雲端 AI 卻未設定 Key 或 API 失敗，絕不靜默降級，保證透明回報！
  */
-export async function recognizeBusinessCard(
+export async function recognizeBusinessCardsFromImage(
   imageSource: Blob | File | string,
   imageDimensions: { width: number; height: number },
   thumbnailDataUrl?: string
-): Promise<Partial<ContactCard>> {
+): Promise<Partial<ContactCard>[]> {
   const settings = getOcrSettings();
-  let parsed: ParsedCardFields;
+  let parsedList: ParsedCardFields[] = [];
 
   if (settings.engine === 'cloud') {
     if (!settings.geminiApiKey?.trim()) {
@@ -712,12 +721,30 @@ export async function recognizeBusinessCard(
       throw new Error('無法讀取名片影像資料');
     }
 
-    parsed = await runCloudGeminiOcr(base64, settings.geminiApiKey, settings.modelName);
+    parsedList = await runCloudGeminiOcr(base64, settings.geminiApiKey, settings.modelName);
   } else {
-    parsed = await runLocalOcr(imageSource, imageDimensions);
+    const single = await runLocalOcr(imageSource, imageDimensions);
+    parsedList = [single];
   }
 
-  return {
+  if (parsedList.length === 0) {
+    parsedList = [
+      {
+        name: '未命名聯絡人',
+        nameEn: '',
+        company: '',
+        department: '',
+        jobTitle: '',
+        taxId: '',
+        phones: [],
+        emails: [],
+        websites: [],
+        addresses: [],
+      },
+    ];
+  }
+
+  return parsedList.map((parsed) => ({
     id: crypto.randomUUID(),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -731,6 +758,39 @@ export async function recognizeBusinessCard(
     emails: parsed.emails,
     websites: parsed.websites,
     addresses: parsed.addresses,
+    socialLinks: {},
+    tags: [],
+    ribbon: { status: 'none', taskTitle: '' },
+    timelineNotes: [],
+    careerHistory: [],
+    isMyDigitalCard: false,
+    thumbnailDataUrl,
+  }));
+}
+
+/**
+ * 智慧辨識（單張相容性入口）：回傳辨識結果陣列之首筆
+ */
+export async function recognizeBusinessCard(
+  imageSource: Blob | File | string,
+  imageDimensions: { width: number; height: number },
+  thumbnailDataUrl?: string
+): Promise<Partial<ContactCard>> {
+  const cards = await recognizeBusinessCardsFromImage(imageSource, imageDimensions, thumbnailDataUrl);
+  return cards[0] || {
+    id: crypto.randomUUID(),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    name: '未命名聯絡人',
+    nameEn: '',
+    company: '',
+    department: '',
+    jobTitle: '',
+    taxId: '',
+    phones: [],
+    emails: [],
+    websites: [],
+    addresses: [],
     socialLinks: {},
     tags: [],
     ribbon: { status: 'none', taskTitle: '' },
