@@ -100,25 +100,27 @@ export const ContactCardItem: React.FC<ContactCardItemProps> = ({
 
       {/* 卡片主體區域：右側預留 pr-24 安全留白防止文字遮擋右上角圖示 */}
       <div className="flex items-start space-x-3 pr-24">
-        {/* 多選勾選鈕：獨立 44px 觸控熱區、手機常態可見、杜絕誤觸進入詳情 */}
+        {/* 多選勾選鈕：獨立 44px 觸控熱區、手機常態高對比可見、杜絕誤觸進入詳情 */}
         <button
           type="button"
           aria-label={isSelected ? `取消選取 ${contact.name}` : `選取 ${contact.name}`}
+          onPointerDown={(e) => e.stopPropagation()}
           onTouchStart={(e) => e.stopPropagation()}
           onTouchEnd={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
             onToggleSelect(contact.id);
           }}
-          className="p-2.5 -m-2.5 flex-shrink-0 flex items-center justify-center cursor-pointer select-none rounded-xl"
+          className="p-2.5 -m-2 z-10 flex-shrink-0 flex items-center justify-center cursor-pointer select-none rounded-xl min-w-[42px] min-h-[42px]"
+          title="勾選此名片"
         >
           <div
-            className={`w-5 h-5 rounded-md border flex items-center justify-center transition-all ${
+            className={`w-5.5 h-5.5 rounded-lg border-2 flex items-center justify-center transition-all ${
               isSelected
-                ? 'bg-blue-600 border-blue-600 text-white shadow-xs'
+                ? 'bg-blue-600 border-blue-600 text-white shadow-sm scale-105'
                 : isMultiSelectMode
-                ? 'border-blue-400 bg-white ring-2 ring-blue-100'
-                : 'border-slate-300 bg-white/80 hover:border-blue-400 hover:bg-blue-50/50'
+                ? 'border-blue-500 bg-blue-50/40 ring-2 ring-blue-100'
+                : 'border-slate-300 bg-white hover:border-blue-400 hover:bg-blue-50/50'
             }`}
           >
             {isSelected && <Check className="w-3.5 h-3.5 stroke-[3]" />}

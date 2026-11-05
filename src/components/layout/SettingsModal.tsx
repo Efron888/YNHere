@@ -44,6 +44,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [isCustomModel, setIsCustomModel] = useState(false);
   const [customModelInput, setCustomModelInput] = useState('');
 
+  // 即時寫入 LocalStorage 並廣播給所有元件，杜絕關閉視窗後狀態遺失或卡在地端模型
+  const applyAndPersistSettings = (next: OcrSettings) => {
+    setSettings(next);
+    saveOcrSettings(next);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('ocr-settings-updated', { detail: next }));
+    }
+    if (onSettingsSaved) {
+      onSettingsSaved(next);
+    }
+  };
+
   useEffect(() => {
     if (isOpen) {
       const current = getOcrSettings();
@@ -52,12 +64,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
       const rawModel = current.modelName || DEFAULT_GEMINI_MODEL;
       const currentModel = rawModel.includes('2.5') ? DEFAULT_GEMINI_MODEL : rawModel;
-      const rawCached = current.availableModels && current.availableModels.length > 0
-        ? current.availableModels
-        : POPULAR_GEMINI_MODELS;
-      const cachedModels = Array.from(
-        new Set(rawCached.filter((m) => !m.includes('2.5')))
-      );
+      const rawCached =
+        current.availableModels && current.availableModels.length > 0
+          ? current.availableModels
+          : POPULAR_GEMINI_MODELS;
+      const cachedModels = Array.from(new Set(rawCached.filter((m) => !m.includes('2.5'))));
       setAvailableModels(cachedModels);
 
       if (cachedModels.includes(currentModel)) {
@@ -89,18 +100,28 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         const cleaned = result.models.filter((m) => !m.includes('2.5'));
         const sorted = [
           ...cleaned.filter((m) => m === 'gemini-1.5-flash' || m === 'gemini-1.5-flash-latest'),
-          ...cleaned.filter((m) => m.includes('flash') && m !== 'gemini-1.5-flash' && m !== 'gemini-1.5-flash-latest'),
+          ...cleaned.filter(
+            (m) => m.includes('flash') && m !== 'gemini-1.5-flash' && m !== 'gemini-1.5-flash-latest'
+          ),
           ...cleaned.filter((m) => !m.includes('flash')),
         ];
         const unique = Array.from(new Set(sorted));
         setAvailableModels(unique);
-        setSettings((prev) => ({
-          ...prev,
+
+        const nextModel =
+          unique.includes(settings.modelName || '') && !settings.modelName?.includes('2.5')
+            ? settings.modelName || DEFAULT_GEMINI_MODEL
+            : unique[0] || DEFAULT_GEMINI_MODEL;
+
+        // 測試金鑰成功後，自動切換為雲端 Gemini 視覺 AI 並立即持久化
+        const nextSettings: OcrSettings = {
+          ...settings,
+          engine: 'cloud',
+          geminiApiKey: settings.geminiApiKey.trim(),
           availableModels: unique,
-          modelName: unique.includes(prev.modelName || '') && !prev.modelName?.includes('2.5')
-            ? prev.modelName
-            : DEFAULT_GEMINI_MODEL,
-        }));
+          modelName: nextModel,
+        };
+        applyAndPersistSettings(nextSettings);
       }
       setTestResult(result);
     } catch (err: unknown) {
@@ -113,81 +134,85 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
-  const handleSave = () => {
+  const handleSaveAndClose = () => {
     const finalModel = isCustomModel
       ? customModelInput.trim() || DEFAULT_GEMINI_MODEL
       : settings.modelName || DEFAULT_GEMINI_MODEL;
 
+    const cleanKey = settings.geminiApiKey?.trim() || '';
+    // 若使用者已填寫 API Key 且未刻意選地端，確保啟用雲端 AI
+    const finalEngine = cleanKey && settings.engine === 'cloud' ? 'cloud' : settings.engine;
+
     const toSave: OcrSettings = {
       ...settings,
-      geminiApiKey: settings.geminiApiKey?.trim() || '',
+      engine: finalEngine,
+      geminiApiKey: cleanKey,
       modelName: finalModel,
       availableModels: availableModels.length > 0 ? availableModels : settings.availableModels,
     };
 
-    saveOcrSettings(toSave);
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('ocr-settings-updated', { detail: toSave }));
-    }
-    if (onSettingsSaved) {
-      onSettingsSaved(toSave);
-    }
+    applyAndPersistSettings(toSave);
     onClose();
   };
 
   return (
     <div
       onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
+        if (e.target === e.currentTarget) handleSaveAndClose();
       }}
       className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200"
     >
       <div className="bg-white w-full max-w-lg rounded-3xl shadow-2xl border border-slate-100 flex flex-col overflow-hidden max-h-[92dvh] sm:max-h-[85vh]">
         {/* 標題欄 */}
-        <div className="px-5 sm:px-6 py-4 sm:py-5 border-b border-slate-100 flex items-center justify-between bg-slate-50/80 sticky top-0 z-10">
-          <div className="flex items-center space-x-2.5">
+        <div className="px-4 sm:px-6 py-3.5 sm:py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/90 sticky top-0 z-10">
+          <div className="flex items-center space-x-2.5 min-w-0">
             <div className="w-9 h-9 rounded-2xl bg-blue-500/10 text-blue-600 flex items-center justify-center font-bold flex-shrink-0">
               <Zap className="w-5 h-5" />
             </div>
-            <div>
-              <h2 className="text-base font-extrabold text-slate-800">名片 AI 辨識與系統設定</h2>
-              <p className="text-xs text-slate-500">配置 Google AI Studio 雲端視覺與一勞永逸模型設定</p>
+            <div className="min-w-0">
+              <h2 className="text-sm sm:text-base font-extrabold text-slate-800 truncate">名片 AI 辨識與模型設定</h2>
+              <p className="text-[11px] text-slate-500 truncate">選取後即時自動儲存・支援雲端 Gemini 與離線 OCR</p>
             </div>
           </div>
           <button
-            onClick={onClose}
-            className="p-2 sm:p-2.5 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-200/60 transition-colors min-w-[40px] min-h-[40px] flex items-center justify-center"
-            title="關閉視窗"
+            type="button"
+            onClick={handleSaveAndClose}
+            className="px-3 py-1.5 bg-slate-200/70 hover:bg-slate-300/80 text-slate-700 rounded-xl font-bold text-xs flex items-center space-x-1 transition-colors min-h-[38px] flex-shrink-0"
+            title="儲存並關閉視窗"
           >
-            <X className="w-5 h-5" />
+            <X className="w-4 h-4" />
+            <span>關閉</span>
           </button>
         </div>
 
         {/* 內容區塊 */}
-        <div className="p-6 overflow-y-auto space-y-6 text-sm">
+        <div className="p-4 sm:p-6 overflow-y-auto space-y-5 text-sm flex-1">
           {/* 引擎選擇 */}
           <div>
             <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
-              辨識引擎模式
+              1. 選擇辨識引擎模式（點選立即生效）
             </label>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 gap-2.5">
               <button
                 type="button"
-                onClick={() => setSettings({ ...settings, engine: 'local' })}
-                className={`p-3.5 rounded-2xl border text-left transition-all relative ${
+                onClick={() => {
+                  const next: OcrSettings = { ...settings, engine: 'local' };
+                  applyAndPersistSettings(next);
+                }}
+                className={`p-3 rounded-2xl border text-left transition-all relative ${
                   settings.engine === 'local'
-                    ? 'border-blue-500 bg-blue-50/50 shadow-sm ring-1 ring-blue-500'
+                    ? 'border-blue-600 bg-blue-50/70 shadow-sm ring-2 ring-blue-500/30'
                     : 'border-slate-200 hover:border-slate-300 bg-white'
                 }`}
               >
-                <div className="flex items-center space-x-2">
-                  <Cpu className={`w-4 h-4 ${settings.engine === 'local' ? 'text-blue-600' : 'text-slate-400'}`} />
+                <div className="flex items-center space-x-2 pr-4">
+                  <Cpu className={`w-4 h-4 flex-shrink-0 ${settings.engine === 'local' ? 'text-blue-600' : 'text-slate-400'}`} />
                   <span className={`text-xs font-bold ${settings.engine === 'local' ? 'text-blue-900' : 'text-slate-700'}`}>
                     本機離線 OCR
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
-                  免連網・免 API Key・100% 離線運算保護隱私
+                  免連網・免 API Key・100% 離線運算
                 </p>
                 {settings.engine === 'local' && (
                   <CheckCircle2 className="w-4 h-4 text-blue-600 absolute top-3 right-3" />
@@ -196,21 +221,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
               <button
                 type="button"
-                onClick={() => setSettings({ ...settings, engine: 'cloud' })}
-                className={`p-3.5 rounded-2xl border text-left transition-all relative ${
+                onClick={() => {
+                  const next: OcrSettings = { ...settings, engine: 'cloud' };
+                  applyAndPersistSettings(next);
+                }}
+                className={`p-3 rounded-2xl border text-left transition-all relative ${
                   settings.engine === 'cloud'
-                    ? 'border-indigo-500 bg-indigo-50/50 shadow-sm ring-1 ring-indigo-500'
+                    ? 'border-indigo-600 bg-indigo-50/70 shadow-sm ring-2 ring-indigo-500/30'
                     : 'border-slate-200 hover:border-slate-300 bg-white'
                 }`}
               >
-                <div className="flex items-center space-x-2">
-                  <Sparkles className={`w-4 h-4 ${settings.engine === 'cloud' ? 'text-indigo-600' : 'text-slate-400'}`} />
+                <div className="flex items-center space-x-2 pr-4">
+                  <Sparkles className={`w-4 h-4 flex-shrink-0 ${settings.engine === 'cloud' ? 'text-indigo-600' : 'text-slate-400'}`} />
                   <span className={`text-xs font-bold ${settings.engine === 'cloud' ? 'text-indigo-900' : 'text-slate-700'}`}>
-                    Google Gemini 視覺 AI
+                    Gemini 視覺 AI
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
-                  極致辨識率・支援反光金屬名片與特殊排版
+                  極致辨識率・支援多張同框與特殊排版
                 </p>
                 {settings.engine === 'cloud' && (
                   <CheckCircle2 className="w-4 h-4 text-indigo-600 absolute top-3 right-3" />
@@ -221,10 +249,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
           {/* Gemini API Key 設定區塊 */}
           <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-4">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between flex-wrap gap-1">
               <div className="flex items-center space-x-2 text-xs font-bold text-slate-800">
                 <Key className="w-4 h-4 text-indigo-600" />
-                <span>Google Gemini API Key</span>
+                <span>2. Google Gemini API Key</span>
               </div>
               <a
                 href="https://aistudio.google.com/docs/api-key"
@@ -242,8 +270,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 type={showKey ? 'text' : 'password'}
                 value={settings.geminiApiKey || ''}
                 onChange={(e) => {
-                  setSettings({ ...settings, geminiApiKey: e.target.value });
+                  const val = e.target.value;
                   setTestResult(null);
+                  // 當使用者輸入有效金鑰時，自動切換為 cloud 引擎並即時儲存
+                  const next: OcrSettings = {
+                    ...settings,
+                    geminiApiKey: val,
+                    engine: val.trim().length > 5 ? 'cloud' : settings.engine,
+                  };
+                  applyAndPersistSettings(next);
                 }}
                 placeholder="貼上 AIzaSy... 開頭的 API Key"
                 className="w-full px-3.5 py-2.5 pr-10 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 bg-white text-xs font-mono"
@@ -251,7 +286,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <button
                 type="button"
                 onClick={() => setShowKey(!showKey)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1"
               >
                 {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
               </button>
@@ -263,7 +298,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 type="button"
                 onClick={handleTestKey}
                 disabled={isTesting || !settings.geminiApiKey?.trim()}
-                className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 shadow-sm flex items-center space-x-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full sm:w-auto px-3.5 py-2 rounded-xl text-xs font-bold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 shadow-sm flex items-center justify-center space-x-1.5 transition-colors disabled:opacity-50"
               >
                 {isTesting ? (
                   <>
@@ -300,21 +335,30 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             {/* 一勞永逸模型設定 */}
             <div className="pt-2 border-t border-slate-200 space-y-2">
               <div className="flex items-center justify-between text-xs">
-                <span className="font-bold text-slate-700">使用模型 (未來更新自動相容)：</span>
+                <span className="font-bold text-slate-700">3. 使用模型（選好自動套用）：</span>
                 <button
                   type="button"
                   onClick={() => setIsCustomModel(!isCustomModel)}
                   className="text-[11px] font-semibold text-indigo-600 hover:underline"
                 >
-                  {isCustomModel ? '← 返回清單選擇' : '✏️ 手動輸入新模型名稱'}
+                  {isCustomModel ? '← 返回清單選擇' : '✏️ 手動輸入新模型'}
                 </button>
               </div>
 
               {!isCustomModel ? (
                 <select
                   value={settings.modelName || DEFAULT_GEMINI_MODEL}
-                  onChange={(e) => setSettings({ ...settings, modelName: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  onChange={(e) => {
+                    const chosenModel = e.target.value;
+                    // 選取 Gemini 模型時自動啟用 cloud 引擎並即時儲存
+                    const next: OcrSettings = {
+                      ...settings,
+                      modelName: chosenModel,
+                      engine: settings.geminiApiKey?.trim() ? 'cloud' : settings.engine,
+                    };
+                    applyAndPersistSettings(next);
+                  }}
+                  className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 >
                   {availableModels.map((m) => (
                     <option key={m} value={m}>
@@ -327,46 +371,43 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <input
                     type="text"
                     value={customModelInput}
-                    onChange={(e) => setCustomModelInput(e.target.value)}
-                    placeholder="例如: gemini-3.0-flash 或 gemini-2.5-pro"
-                    className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setCustomModelInput(val);
+                      if (val.trim()) {
+                        applyAndPersistSettings({
+                          ...settings,
+                          modelName: val.trim(),
+                          engine: settings.geminiApiKey?.trim() ? 'cloud' : settings.engine,
+                        });
+                      }
+                    }}
+                    placeholder="例如: gemini-1.5-flash 或 gemini-2.0-flash"
+                    className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />
-                  <p className="text-[10px] text-slate-400">
-                    💡 一勞永逸：當 Google 未來發布新模型時，直接在此填寫新模型代號即可，無需升級任何軟體！
-                  </p>
                 </div>
               )}
             </div>
           </div>
 
           {/* 資安與隱私保障提示 */}
-          <div className="p-3.5 rounded-2xl bg-blue-50/60 border border-blue-200/60 flex items-start space-x-2.5 text-xs text-blue-900">
+          <div className="p-3 rounded-2xl bg-blue-50/60 border border-blue-200/60 flex items-start space-x-2 text-xs text-blue-900">
             <ShieldCheck className="w-4 h-4 text-blue-600 flex-shrink-0 mt-0.5" />
-            <div className="space-y-1 text-[11px] leading-relaxed">
-              <div className="font-bold">100% 隱私與本地安全承諾 (Zero Trust)</div>
-              <p className="text-blue-800/90">
-                您的 API 金鑰僅保存在本機瀏覽器（Local Storage），辨識請求直接從瀏覽器安全連線至 Google AI 官方伺服器，絕不上傳至任何第三方主機。
-              </p>
+            <div className="text-[11px] leading-relaxed">
+              <strong>100% 隱私承諾：</strong>API 金鑰僅保存在您的手機/電腦瀏覽器本機，直接連線 Google AI 官方伺服器。
             </div>
           </div>
         </div>
 
-        {/* 底部按鈕 */}
-        <div className="px-5 sm:px-6 py-3.5 sm:py-4 bg-slate-50 border-t border-slate-100 flex items-center justify-end space-x-3 sticky bottom-0 z-10 shadow-xs">
+        {/* 底部按鈕：全寬清晰確認並關閉 */}
+        <div className="px-4 sm:px-6 py-3 bg-slate-50 border-t border-slate-100 flex items-center justify-end sticky bottom-0 z-10">
           <button
             type="button"
-            onClick={onClose}
-            className="px-4 py-2.5 text-xs font-semibold text-slate-600 hover:text-slate-800 hover:bg-slate-200/60 rounded-xl transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center"
+            onClick={handleSaveAndClose}
+            className="w-full sm:w-auto px-6 py-2.5 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 active:bg-blue-800 rounded-xl shadow-sm transition-all flex items-center justify-center space-x-1.5 min-h-[42px]"
           >
-            取消
-          </button>
-          <button
-            type="button"
-            onClick={handleSave}
-            className="px-5 py-2.5 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 active:bg-blue-800 rounded-xl shadow-sm transition-all flex items-center space-x-1.5 min-w-[44px] min-h-[44px]"
-          >
-            <CheckCircle2 className="w-3.5 h-3.5" />
-            <span>儲存設定</span>
+            <CheckCircle2 className="w-4 h-4" />
+            <span>完成並關閉設定 ({settings.engine === 'cloud' ? `已啟用 Gemini AI` : '本機離線 OCR'})</span>
           </button>
         </div>
       </div>

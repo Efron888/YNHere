@@ -303,11 +303,13 @@ export const ContactDetailDrawer: React.FC<ContactDetailDrawerProps> = ({
               <span>儲存</span>
             </button>
             <button
+              type="button"
               onClick={onClose}
-              className="p-2 sm:p-2.5 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-100 min-w-[40px] min-h-[40px] flex items-center justify-center transition-colors"
+              className="px-3 py-1.5 rounded-xl bg-slate-200/70 hover:bg-slate-300/80 text-slate-700 font-bold text-xs flex items-center space-x-1 min-h-[38px] transition-colors"
               title="關閉名片"
             >
-              <X className="w-5 h-5" />
+              <X className="w-4 h-4" />
+              <span>關閉</span>
             </button>
           </div>
         </div>
@@ -382,11 +384,10 @@ export const ContactDetailDrawer: React.FC<ContactDetailDrawerProps> = ({
                     type="button"
                     onClick={() => {
                       const latest = getOcrSettings();
+                      handleEngineChange({ ...latest, engine: 'cloud' });
                       if (!latest.geminiApiKey?.trim()) {
                         if (onOpenSettings) onOpenSettings();
-                        return;
                       }
-                      handleEngineChange({ ...latest, engine: 'cloud' });
                     }}
                     className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all ${
                       ocrSettings.engine === 'cloud'
@@ -811,7 +812,7 @@ export const ContactDetailDrawer: React.FC<ContactDetailDrawerProps> = ({
           </div>
 
           {/* 底部控制列 */}
-          <div className="pt-4 border-t border-slate-100 flex justify-between items-center">
+          <div className="sticky bottom-0 z-10 bg-white/95 backdrop-blur-md pt-3 pb-3 -mx-6 px-6 border-t border-slate-200 flex justify-between items-center gap-3">
             <button
               type="button"
               onClick={() => {
@@ -826,13 +827,26 @@ export const ContactDetailDrawer: React.FC<ContactDetailDrawerProps> = ({
               <span>刪除此聯絡人</span>
             </button>
 
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors min-h-[38px]"
-            >
-              關閉名片
-            </button>
+            <div className="flex items-center space-x-2">
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-2 text-xs font-bold text-slate-700 bg-slate-200/80 hover:bg-slate-300 rounded-xl transition-colors min-h-[40px]"
+              >
+                關閉視窗
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onSave(form);
+                  onClose();
+                }}
+                className="px-5 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-sm transition-colors flex items-center space-x-1.5 min-h-[40px]"
+              >
+                <Save className="w-4 h-4" />
+                <span>儲存變更</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>

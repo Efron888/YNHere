@@ -63,6 +63,40 @@ describe('vCard 3.0 編解碼器 (vcardCodec)', () => {
     expect(imported.length).toBe(2);
   });
 
+  it('應能正確匯入 Android (vCard 2.1 Quoted-Printable 軟換行) 與 iOS (item1.TEL 群組前綴) 的多人通訊錄 .vcf 檔', () => {
+    const mobileVcf = [
+      'BEGIN:VCARD',
+      'VERSION:2.1',
+      'N;CHARSET=UTF-8;ENCODING=QUOTED-PRINTABLE:=E5=8A=89;=E6=99=AF=E6=96=87;;;',
+      'FN;CHARSET=UTF-8;ENCODING=QUOTED-PRINTABLE:=E5=8A=89=E6=99=AF=',
+      '=E6=96=87',
+      'TEL;CELL:0935-169-153',
+      'END:VCARD',
+      'BEGIN:VCARD',
+      'VERSION:3.0',
+      'N:蔡;金波;;;',
+      'FN:蔡金波',
+      'item1.TEL;type=CELL;type=VOICE;type=pref:0972-761-915',
+      'item2.EMAIL;type=INTERNET:tsai@spil.com.tw',
+      'END:VCARD',
+      'BEGIN:VCARD',
+      'VERSION:3.0',
+      'N:詹;睿源;;;',
+      'TEL;TYPE=CELL:0978-893-537',
+      'END:VCARD',
+    ].join('\r\n');
+
+    const imported = importFromVCard(mobileVcf);
+    expect(imported.length).toBe(3);
+    expect(imported[0].name).toBe('劉景文');
+    expect(imported[0].phones[0].number).toBe('0935-169-153');
+    expect(imported[1].name).toBe('蔡金波');
+    expect(imported[1].phones[0].number).toBe('0972-761-915');
+    expect(imported[1].emails[0]).toBe('tsai@spil.com.tw');
+    expect(imported[2].name).toBe('詹睿源');
+    expect(imported[2].phones[0].number).toBe('0978-893-537');
+  });
+
   it('QR Code 精簡版 vCard 必須控制在 700 Bytes 以內', () => {
     const contact = createDummyContact({});
     const compactVcf = generateCompactVCardForQr(contact);

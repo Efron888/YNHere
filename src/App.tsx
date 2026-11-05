@@ -14,14 +14,13 @@ import { MyDigitalCardView } from './components/mycard/MyDigitalCardView';
 import { ContactMapView } from './components/map/ContactMapView';
 import { recognizeBusinessCard } from './services/ocr/ocrEngine';
 import { getMyStandaloneProfile, saveMyStandaloneProfile } from './services/profile/profileService';
-import { mergeContacts } from './services/deduplication/duplicateMatcher';
+import { calculateDuplicateScore, mergeContacts } from './services/deduplication/duplicateMatcher';
 import {
   Search,
   CheckSquare,
   Square,
   Trash2,
   Share2,
-  Download,
   Camera,
   Users,
   MapPin,
@@ -225,6 +224,83 @@ export function App() {
     await loadContactsFromDb();
   };
 
+  // 合併聯絡人並自動清理庫中所有同名重複卡片，確保合併後絕對只有 1 張名片
+  const handleMergeAndDeduplicateContact = async (mergedCard: ContactCard) => {
+    const allInDb = await db.contacts.toArray();
+    let finalMerged = mergedCard;
+    const redundantIds: string[] = [];
+
+    for (const item of allInDb) {
+      if (item.id === mergedCard.id || item.isMyDigitalCard) continue;
+      const sameRealName =
+        mergedCard.name &&
+        mergedCard.name !== '未命名聯絡人' &&
+        item.name.trim() === mergedCard.name.trim();
+      const score = calculateDuplicateScore(finalMerged, item);
+      if (score >= 0.75 || sameRealName) {
+        finalMerged = mergeContacts(finalMerged, item);
+        redundantIds.push(item.id);
+      }
+    }
+
+    await db.contacts.put(finalMerged);
+    if (redundantIds.length > 0) {
+      await db.contacts.bulkDelete(redundantIds);
+    }
+    await loadContactsFromDb();
+  };
+
+  // 自動偵測人脈庫中現存的重複名片群組 (例如同名的 2 張劉景文、2 張李小華)
+  const duplicateGroups = useMemo(() => {
+    const visited = new Set<string>();
+    const groups: ContactCard[][] = [];
+
+    for (let i = 0; i < contacts.length; i++) {
+      const a = contacts[i];
+      if (visited.has(a.id) || !a.name || a.name === '未命名聯絡人') continue;
+
+      const group: ContactCard[] = [a];
+      for (let j = i + 1; j < contacts.length; j++) {
+        const b = contacts[j];
+        if (visited.has(b.id)) continue;
+        const sameName = a.name.trim() === b.name.trim();
+        const score = calculateDuplicateScore(a, b);
+        if (sameName || score >= 0.75) {
+          group.push(b);
+          visited.add(b.id);
+        }
+      }
+      if (group.length >= 2) {
+        visited.add(a.id);
+        groups.push(group);
+      }
+    }
+    return groups;
+  }, [contacts]);
+
+  // 一鍵智慧合併人脈庫中所有重複名片
+  const handleAutoMergeAllDuplicates = async () => {
+    if (duplicateGroups.length === 0) return;
+    const idsToDelete: string[] = [];
+
+    for (const group of duplicateGroups) {
+      let master = group[0];
+      for (let i = 1; i < group.length; i++) {
+        master = mergeContacts(master, group[i]);
+        idsToDelete.push(group[i].id);
+      }
+      await db.contacts.put(master);
+    }
+
+    if (idsToDelete.length > 0) {
+      await db.contacts.bulkDelete(idsToDelete);
+    }
+    setSelectedIds(new Set());
+    setIsMultiSelectMode(false);
+    await loadContactsFromDb();
+    alert(`已成功將 ${duplicateGroups.length} 組重複名片合併完成，並完整保留所有電話與職涯歷史！`);
+  };
+
   // 刪除單筆聯絡人
   const handleDeleteContact = async (id: string) => {
     await db.contacts.delete(id);
@@ -411,8 +487,8 @@ export function App() {
             <div className="space-y-4">
               {/* 搜尋列與多選工具列 */}
               <div className="bg-white p-3.5 rounded-3xl border border-slate-200/80 shadow-sm space-y-3">
-                <div className="flex items-center gap-2">
-                  <div className="relative flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="relative flex-1 min-w-[200px]">
                     <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
                     <input
                       type="text"
@@ -424,7 +500,7 @@ export function App() {
                   </div>
 
                   {/* 排序切換 */}
-                  <div className="flex items-center space-x-1 border border-slate-200 rounded-2xl px-2 py-1 bg-slate-50 text-xs">
+                  <div className="flex items-center space-x-1 border border-slate-200 rounded-2xl px-2.5 py-2 bg-slate-50 text-xs flex-shrink-0">
                     <ArrowUpDown className="w-3.5 h-3.5 text-slate-400" />
                     <select
                       value={sortBy}
@@ -443,14 +519,14 @@ export function App() {
                       setIsMultiSelectMode(!isMultiSelectMode);
                       if (isMultiSelectMode) setSelectedIds(new Set());
                     }}
-                    className={`px-3 py-2 rounded-2xl text-xs font-semibold flex items-center space-x-1.5 transition-colors ${
+                    className={`px-3 py-2 rounded-2xl text-xs font-bold flex items-center space-x-1.5 transition-colors flex-shrink-0 ${
                       isMultiSelectMode
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                        ? 'bg-blue-600 text-white shadow-sm'
+                        : 'bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100'
                     }`}
                   >
                     {isMultiSelectMode ? <CheckSquare className="w-3.5 h-3.5" /> : <Square className="w-3.5 h-3.5" />}
-                    <span>{isMultiSelectMode ? '完成選取' : '批次選取'}</span>
+                    <span>{isMultiSelectMode ? `已選 ${selectedIds.size} 張 (完成)` : '勾選 / 合併名片'}</span>
                   </button>
                 </div>
 
@@ -509,6 +585,25 @@ export function App() {
                   </button>
                 </div>
               </div>
+
+              {/* 偵測到名片庫內有同名重複名片時，顯示一鍵自動合併橫幅 */}
+              {duplicateGroups.length > 0 && (
+                <div className="bg-amber-50 border border-amber-300 rounded-3xl p-4 flex flex-wrap items-center justify-between gap-3 text-xs shadow-sm">
+                  <div className="flex items-center space-x-2 text-amber-900 font-semibold">
+                    <GitMerge className="w-4 h-4 text-amber-600 flex-shrink-0" />
+                    <span>
+                      偵測到 <strong>{duplicateGroups.length}</strong> 組重複名片（例如：{duplicateGroups.map(g => g[0].name).slice(0, 3).join('、')}），可一鍵合併為單一張名片並保留職涯歷史紀錄！
+                    </span>
+                  </div>
+                  <button
+                    onClick={handleAutoMergeAllDuplicates}
+                    className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold flex items-center space-x-1.5 shadow-sm transition-colors"
+                  >
+                    <GitMerge className="w-3.5 h-3.5" />
+                    <span>一鍵合併所有重複名片</span>
+                  </button>
+                </div>
+              )}
 
               {/* 若發現舊版殘留之「未命名聯絡人」，顯示一鍵 AI 重新辨識與清理橫幅 */}
               {unnamedContacts.length > 0 && (
@@ -598,22 +693,22 @@ export function App() {
 
       {/* 批次多選浮動操作列 (已勾選 >= 1 張時浮現) */}
       {isMultiSelectMode && (
-        <div className="fixed bottom-16 sm:bottom-6 left-1/2 -translate-x-1/2 z-40 bg-slate-900/95 backdrop-blur-md text-white px-5 py-3 rounded-2xl shadow-2xl flex items-center space-x-3 border border-slate-700 text-xs">
-          <span className="font-bold text-blue-400">已選取 {selectedIds.size} 張</span>
+        <div className="fixed bottom-16 sm:bottom-6 left-1/2 -translate-x-1/2 z-40 w-[94vw] sm:w-auto max-w-xl bg-slate-900/95 backdrop-blur-md text-white px-4 py-3 rounded-2xl shadow-2xl flex flex-wrap items-center justify-center gap-2.5 border border-slate-700 text-xs">
+          <span className="font-bold text-blue-400">已選 {selectedIds.size} 張</span>
           <div className="h-4 w-px bg-slate-700" />
           <button onClick={handleSelectAll} className="hover:text-blue-300 font-semibold">
-            {selectedIds.size === filteredContacts.length ? '取消全選' : '一鍵全選'}
+            {selectedIds.size === filteredContacts.length ? '取消全選' : '全選'}
           </button>
           <div className="h-4 w-px bg-slate-700" />
           {selectedIds.size >= 2 && (
             <>
               <button
                 onClick={handleMergeSelected}
-                className="flex items-center space-x-1 text-amber-300 hover:text-amber-200 font-semibold"
+                className="flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-amber-500 text-slate-950 hover:bg-amber-400 font-bold"
                 title="智慧合併所選名片"
               >
                 <GitMerge className="w-3.5 h-3.5" />
-                <span>合併名片</span>
+                <span>合併為 1 張</span>
               </button>
               <div className="h-4 w-px bg-slate-700" />
             </>
@@ -624,15 +719,7 @@ export function App() {
             className="flex items-center space-x-1 hover:text-blue-300 font-semibold disabled:opacity-50"
           >
             <Share2 className="w-3.5 h-3.5" />
-            <span>分享</span>
-          </button>
-          <button
-            onClick={() => setIsExchangeOpen(true)}
-            disabled={selectedIds.size === 0}
-            className="flex items-center space-x-1 hover:text-blue-300 font-semibold disabled:opacity-50"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>導出</span>
+            <span>分享/導出</span>
           </button>
           <button
             onClick={handleBatchDelete}
@@ -641,6 +728,15 @@ export function App() {
           >
             <Trash2 className="w-3.5 h-3.5" />
             <span>刪除</span>
+          </button>
+          <button
+            onClick={() => {
+              setIsMultiSelectMode(false);
+              setSelectedIds(new Set());
+            }}
+            className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold"
+          >
+            完成
           </button>
         </div>
       )}
@@ -668,7 +764,7 @@ export function App() {
         onClose={() => setIsScannerOpen(false)}
         existingContacts={contacts}
         onSaveNewContact={handleSaveContact}
-        onMergeContact={handleSaveContact}
+        onMergeContact={handleMergeAndDeduplicateContact}
         onOpenSettings={() => setIsSettingsOpen(true)}
       />
 

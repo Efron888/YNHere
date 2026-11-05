@@ -13,6 +13,7 @@ import {
   Mail,
   Building2,
   Trash2,
+  GitMerge,
 } from 'lucide-react';
 import { detectAndCropCards } from '../../services/cv/cardDetector';
 import {
@@ -20,6 +21,8 @@ import {
   getOcrSettings,
   saveOcrSettings,
   OcrSettings,
+  DEFAULT_GEMINI_MODEL,
+  POPULAR_GEMINI_MODELS,
 } from '../../services/ocr/ocrEngine';
 import { calculateDuplicateScore, mergeContacts } from '../../services/deduplication/duplicateMatcher';
 import { ContactCard } from '../../types/contact';
@@ -42,13 +45,12 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
   onMergeContact,
   onOpenSettings,
 }) => {
-  if (!isOpen) return null;
-
   const [mode, setMode] = useState<'single' | 'continuous' | 'multi'>('single');
   const [isProcessing, setIsProcessing] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
   const [previewCards, setPreviewCards] = useState<ContactCard[]>([]);
-  const [duplicateTarget, setDuplicateTarget] = useState<{ existing: ContactCard; incoming: ContactCard } | null>(null);
+  // 紀錄每張 incoming card 對應到的既有重複聯絡人 (支援多張同時去重合併)
+  const [duplicateMap, setDuplicateMap] = useState<Record<string, ContactCard>>({});
   const [ocrSettings, setOcrSettings] = useState<OcrSettings>(() => getOcrSettings());
   const [showEngineConfig, setShowEngineConfig] = useState(false);
 
@@ -63,12 +65,29 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
     return () => window.removeEventListener('ocr-settings-updated', sync);
   }, [isOpen]);
 
+  if (!isOpen) return null;
+
   const handleEngineChange = (next: OcrSettings) => {
     setOcrSettings(next);
     saveOcrSettings(next);
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('ocr-settings-updated', { detail: next }));
     }
+  };
+
+  // 尋找既有聯絡人中是否已有同名或高相似度名片
+  const findMatchingExisting = (incoming: ContactCard): ContactCard | undefined => {
+    for (const exist of existingContacts) {
+      const score = calculateDuplicateScore(exist, incoming);
+      const sameRealName =
+        incoming.name &&
+        incoming.name !== '未命名聯絡人' &&
+        exist.name.trim() === incoming.name.trim();
+      if (score >= 0.75 || sameRealName) {
+        return exist;
+      }
+    }
+    return undefined;
   };
 
   /**
@@ -82,94 +101,129 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
       setIsProcessing(true);
       const currentSettings = getOcrSettings();
       const newRecognizedAll: ContactCard[] = [];
+      const newDupMap: Record<string, ContactCard> = { ...duplicateMap };
 
       for (let fIdx = 0; fIdx < fileList.length; fIdx++) {
         const file = fileList[fIdx];
         setStatusMessage(`處理圖片中 (${fIdx + 1}/${fileList.length}): ${file.name}...`);
 
-        // 電腦視覺輪廓檢測與裁切
-        const detected = await detectAndCropCards(file, mode === 'multi' ? 'batch' : 'single');
+        try {
+          const detected = await detectAndCropCards(file, mode === 'multi' ? 'batch' : 'single');
 
-        for (let i = 0; i < detected.length; i++) {
-          setStatusMessage(
-            currentSettings.engine === 'cloud' && currentSettings.geminiApiKey
-              ? `AI 辨識中 (${fIdx + 1}/${fileList.length}) 圖 ${i + 1}/${detected.length} [${currentSettings.modelName || 'Gemini'}]...`
-              : `本機離線 OCR 辨識中 (${fIdx + 1}/${fileList.length}) 圖 ${i + 1}/${detected.length}...`
-          );
+          for (let i = 0; i < detected.length; i++) {
+            setStatusMessage(
+              currentSettings.engine === 'cloud' && currentSettings.geminiApiKey
+                ? `AI 視覺辨識中 (${fIdx + 1}/${fileList.length}) [${currentSettings.modelName || 'Gemini'}]...`
+                : `本機離線 OCR 辨識中 (${fIdx + 1}/${fileList.length})...`
+            );
 
-          const item = detected[i];
-          const partialCards = await recognizeBusinessCardsFromImage(
-            item.blob,
-            { width: item.width, height: item.height },
-            item.thumbnailDataUrl
-          );
+            const item = detected[i];
+            const partialCards = await recognizeBusinessCardsFromImage(
+              item.blob,
+              { width: item.width, height: item.height },
+              item.thumbnailDataUrl
+            );
 
-          const imageId = crypto.randomUUID();
-          const bytes = new Uint8Array(await item.blob.arrayBuffer());
-          await db.cardImages.put({
-            id: imageId,
-            mimeType: item.blob.type === 'image/webp' ? 'image/webp' : 'image/jpeg',
-            data: bytes,
-            width: item.width,
-            height: item.height,
-            createdAt: new Date().toISOString(),
-          });
-
-          for (const partial of partialCards) {
-            const newCard: ContactCard = {
-              id: crypto.randomUUID(),
+            const imageId = crypto.randomUUID();
+            const bytes = new Uint8Array(await item.blob.arrayBuffer());
+            await db.cardImages.put({
+              id: imageId,
+              mimeType: item.blob.type === 'image/webp' ? 'image/webp' : 'image/jpeg',
+              data: bytes,
+              width: item.width,
+              height: item.height,
               createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-              name: partial.name || '未命名聯絡人',
-              nameEn: partial.nameEn || '',
-              company: partial.company || '',
-              department: partial.department || '',
-              jobTitle: partial.jobTitle || '',
-              taxId: partial.taxId || '',
-              phones: partial.phones || [],
-              emails: partial.emails || [],
-              websites: partial.websites || [],
-              addresses: partial.addresses || [],
-              socialLinks: {},
-              tags: ['最新掃描'],
-              ribbon: { status: 'none', taskTitle: '' },
-              timelineNotes: [],
-              careerHistory: [],
-              isMyDigitalCard: false,
-              frontImageId: imageId,
-              thumbnailDataUrl: item.thumbnailDataUrl,
-            };
+            });
 
-            newRecognizedAll.push(newCard);
+            for (const partial of partialCards) {
+              const newCard: ContactCard = {
+                id: crypto.randomUUID(),
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+                name: partial.name || '未命名聯絡人',
+                nameEn: partial.nameEn || '',
+                company: partial.company || '',
+                department: partial.department || '',
+                jobTitle: partial.jobTitle || '',
+                taxId: partial.taxId || '',
+                phones: partial.phones || [],
+                emails: partial.emails || [],
+                websites: partial.websites || [],
+                addresses: partial.addresses || [],
+                socialLinks: {},
+                tags: ['最新掃描'],
+                ribbon: { status: 'none', taskTitle: '' },
+                timelineNotes: [],
+                careerHistory: [],
+                isMyDigitalCard: false,
+                frontImageId: imageId,
+                thumbnailDataUrl: item.thumbnailDataUrl,
+              };
 
-            // 比對既有聯絡人，若有高度重複則提示合併
-            for (const exist of existingContacts) {
-              const score = calculateDuplicateScore(exist, newCard);
-              if (score >= 0.8) {
-                setDuplicateTarget({ existing: exist, incoming: newCard });
-                break;
+              // 檢查是否與目前已辨識隊列中的同批名片重複，或與資料庫既有名片重複
+              const matchedExist = findMatchingExisting(newCard);
+              if (matchedExist) {
+                newDupMap[newCard.id] = matchedExist;
               }
+
+              newRecognizedAll.push(newCard);
             }
           }
+        } catch (singleFileErr) {
+          console.error(`圖片 ${file.name} 辨識失敗:`, singleFileErr);
+          if (fileList.length === 1) throw singleFileErr;
         }
       }
 
+      setDuplicateMap(newDupMap);
       setPreviewCards((prev) => [...prev, ...newRecognizedAll]);
       setStatusMessage(`辨識完成！共識別出 ${newRecognizedAll.length} 位聯絡人`);
     } catch (err: unknown) {
       console.error('掃描辨識錯誤:', err);
       const errMsg = err instanceof Error ? err.message : String(err);
-      alert(`名片辨識發生問題：\n\n${errMsg}\n\n若使用雲端 AI，請點擊「AI 辨識引擎」切換或檢查金鑰！`);
+      alert(`名片辨識發生問題：\n\n${errMsg}\n\n若使用雲端 AI，請點擊上方引擎按鈕檢查 API Key！`);
     } finally {
       setIsProcessing(false);
     }
   };
 
+  // 執行單張合併並自預覽清單剔除
+  const handleMergeOne = (incoming: ContactCard, existing: ContactCard) => {
+    const merged = mergeContacts(existing, incoming);
+    onMergeContact(merged);
+    const nextPreview = previewCards.filter((c) => c.id !== incoming.id);
+    setPreviewCards(nextPreview);
+    const nextDup = { ...duplicateMap };
+    delete nextDup[incoming.id];
+    setDuplicateMap(nextDup);
+
+    if (nextPreview.length === 0) {
+      onClose();
+    }
+  };
+
+  // 一鍵收錄全部（若有重複名片自動智慧合併，絕不產生 2 張重複名片！）
+  const handleSaveOrMergeAll = () => {
+    for (const card of previewCards) {
+      const matchedExist = duplicateMap[card.id] || findMatchingExisting(card);
+      if (matchedExist) {
+        const merged = mergeContacts(matchedExist, card);
+        onMergeContact(merged);
+      } else {
+        onSaveNewContact(card);
+      }
+    }
+    setPreviewCards([]);
+    setDuplicateMap({});
+    onClose();
+  };
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
-    processMultipleFiles(Array.from(files));
+    const clonedFiles = Array.from(files);
     e.target.value = '';
+    processMultipleFiles(clonedFiles);
   };
 
   const handleDrop = (e: React.DragEvent) => {
@@ -178,6 +232,19 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
     if (!files || files.length === 0) return;
     processMultipleFiles(Array.from(files));
   };
+
+  const duplicateEntries = previewCards
+    .filter((c) => Boolean(duplicateMap[c.id]))
+    .map((c) => ({ incoming: c, existing: duplicateMap[c.id] }));
+
+  const modelOptions = Array.from(
+    new Set(
+      (ocrSettings.availableModels && ocrSettings.availableModels.length > 0
+        ? ocrSettings.availableModels
+        : POPULAR_GEMINI_MODELS
+      ).filter((m) => !m.includes('2.5'))
+    )
+  );
 
   return (
     <div
@@ -188,136 +255,141 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
     >
       <div className="bg-white rounded-3xl max-w-xl w-full shadow-2xl flex flex-col overflow-hidden max-h-[92dvh] sm:max-h-[88vh]">
         {/* 頂部 Header */}
-        <div className="px-5 sm:px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/80 sticky top-0 z-10">
-          <div className="flex items-center space-x-2.5">
+        <div className="px-4 sm:px-6 py-3.5 border-b border-slate-100 flex items-center justify-between bg-slate-50/90 sticky top-0 z-10 gap-2">
+          <div className="flex items-center space-x-2 min-w-0">
             <div className="w-9 h-9 rounded-2xl bg-blue-500/10 text-blue-600 flex items-center justify-center font-bold flex-shrink-0">
               <Camera className="w-5 h-5" />
             </div>
-            <div>
-              <h2 className="text-base font-extrabold text-slate-800">名片智慧掃描與切分</h2>
-              <p className="text-xs text-slate-500">支援單張、同框多名片與相簿多選循序辨識</p>
+            <div className="min-w-0">
+              <h2 className="text-sm sm:text-base font-extrabold text-slate-800 truncate">名片智慧掃描與多張導入</h2>
+              <p className="text-[11px] text-slate-500 truncate">支援單張、同框多張切分與相簿多選導入</p>
             </div>
           </div>
-          <div className="flex items-center space-x-1.5">
+          <div className="flex items-center space-x-1.5 flex-shrink-0">
             <button
               type="button"
               onClick={() => setShowEngineConfig(!showEngineConfig)}
-              className={`px-2.5 py-1.5 rounded-xl text-xs font-semibold flex items-center space-x-1 border transition-colors ${
+              className={`px-2.5 py-1.5 rounded-xl text-xs font-bold flex items-center space-x-1 border transition-colors min-h-[38px] ${
                 ocrSettings.engine === 'cloud'
-                  ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
-                  : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                  ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                  : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
               }`}
             >
               {ocrSettings.engine === 'cloud' ? <Sparkles className="w-3.5 h-3.5" /> : <Cpu className="w-3.5 h-3.5" />}
-              <span>
-                {ocrSettings.engine === 'cloud'
-                  ? `Gemini AI (${ocrSettings.modelName || 'flash'})`
-                  : '本機離線 OCR'}
-              </span>
+              <span>{ocrSettings.engine === 'cloud' ? 'AI 模型辨識' : '地端離線 OCR'}</span>
             </button>
             <button
+              type="button"
               onClick={onClose}
-              className="p-2 sm:p-2.5 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-200/60 transition-colors min-w-[40px] min-h-[40px] flex items-center justify-center"
+              className="px-3 py-1.5 bg-slate-200/70 hover:bg-slate-300/80 text-slate-700 rounded-xl font-bold text-xs flex items-center space-x-1 transition-colors min-h-[38px]"
               title="關閉視窗"
             >
-              <X className="w-5 h-5" />
+              <X className="w-4 h-4" />
+              <span>關閉</span>
             </button>
           </div>
         </div>
 
         {/* 捲動內容區塊 */}
-        <div className="p-5 sm:p-6 overflow-y-auto space-y-4 text-xs">
-          {/* AI 辨識引擎切換面板 */}
-          {showEngineConfig && (
-            <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200 space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="font-bold text-slate-700">選擇名片 AI 辨識引擎：</span>
-                <a
-                  href="https://aistudio.google.com/docs/api-key"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-[11px] text-indigo-600 hover:underline flex items-center space-x-1"
-                >
-                  <span>取得免費 Gemini Key</span>
-                  <span className="text-[9px]">↗</span>
-                </a>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
+        <div className="p-4 sm:p-6 overflow-y-auto space-y-4 text-xs flex-1">
+          {/* 常駐快速引擎切換列（手機端一目了然，點選直接切換不卡死） */}
+          <div className="bg-slate-50 p-3 rounded-2xl border border-slate-200 space-y-2.5">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <span className="font-bold text-slate-700">當前辨識引擎：</span>
+              <div className="flex items-center gap-1.5">
                 <button
                   type="button"
                   onClick={() => handleEngineChange({ ...ocrSettings, engine: 'local' })}
-                  className={`p-2.5 rounded-xl border text-left transition-all ${
+                  className={`px-3 py-1.5 rounded-xl font-bold transition-all ${
                     ocrSettings.engine === 'local'
-                      ? 'bg-blue-50 border-blue-500 text-blue-900 font-bold ring-1 ring-blue-500'
-                      : 'bg-white border-slate-200 text-slate-600'
+                      ? 'bg-blue-600 text-white shadow-xs'
+                      : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
                   }`}
                 >
-                  <div>引擎 A：本機離線 OCR</div>
-                  <div className="text-[10px] font-normal text-slate-500 mt-0.5">免費 0 元、免連網保護隱私</div>
+                  地端離線模型
                 </button>
                 <button
                   type="button"
                   onClick={() => {
                     const latest = getOcrSettings();
-                    if (!latest.geminiApiKey?.trim() && onOpenSettings) {
+                    // 先立即切換狀態至 cloud 並儲存，確保選項直接切過去不卡在地端
+                    const updated: OcrSettings = { ...latest, engine: 'cloud' };
+                    handleEngineChange(updated);
+                    if (!updated.geminiApiKey?.trim() && onOpenSettings) {
                       onOpenSettings();
-                      return;
                     }
-                    handleEngineChange({ ...latest, engine: 'cloud' });
                   }}
-                  className={`p-2.5 rounded-xl border text-left transition-all ${
+                  className={`px-3 py-1.5 rounded-xl font-bold transition-all flex items-center space-x-1 ${
                     ocrSettings.engine === 'cloud'
-                      ? 'bg-indigo-50 border-indigo-500 text-indigo-900 font-bold ring-1 ring-indigo-500'
-                      : 'bg-white border-slate-200 text-slate-600'
+                      ? 'bg-indigo-600 text-white shadow-xs'
+                      : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
                   }`}
                 >
-                  <div>引擎 B：Gemini 視覺 AI</div>
-                  <div className="text-[10px] font-normal text-slate-500 mt-0.5">極致辨識率、同框多名片辨識</div>
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Gemini AI 模型辨識</span>
                 </button>
               </div>
-              {ocrSettings.engine === 'cloud' && (
-                <div className="flex items-center justify-between text-[11px] pt-2 border-t border-slate-200/60 text-indigo-900 bg-indigo-50/50 px-3 py-2 rounded-xl">
-                  <div className="flex items-center space-x-1.5">
-                    <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
-                    <span>
-                      已啟用 Gemini 視覺 AI：<strong className="font-mono">{ocrSettings.modelName || 'gemini-1.5-flash'}</strong>
-                    </span>
-                  </div>
-                  {onOpenSettings && (
-                    <button
-                      type="button"
-                      onClick={onOpenSettings}
-                      className="text-[11px] font-semibold text-indigo-600 hover:underline flex items-center space-x-0.5"
-                    >
-                      <span>⚙️ 變更金鑰/模型</span>
-                    </button>
-                  )}
-                </div>
-              )}
             </div>
-          )}
+
+            {(ocrSettings.engine === 'cloud' || showEngineConfig) && (
+              <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-200/70 flex-wrap">
+                <div className="flex items-center space-x-1.5 flex-1 min-w-[180px]">
+                  <span className="text-[11px] font-semibold text-slate-600 whitespace-nowrap">模型：</span>
+                  <select
+                    value={ocrSettings.modelName || DEFAULT_GEMINI_MODEL}
+                    onChange={(e) =>
+                      handleEngineChange({
+                        ...ocrSettings,
+                        engine: 'cloud',
+                        modelName: e.target.value,
+                      })
+                    }
+                    className="flex-1 px-2.5 py-1 rounded-lg border border-slate-300 bg-white text-[11px] font-mono text-slate-800"
+                  >
+                    {modelOptions.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                {onOpenSettings && (
+                  <button
+                    type="button"
+                    onClick={onOpenSettings}
+                    className="px-2.5 py-1 rounded-lg bg-indigo-50 text-indigo-700 font-bold text-[11px] hover:bg-indigo-100"
+                  >
+                    ⚙️ 設定金鑰
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
 
           {/* 拍攝模式切換 */}
           <div className="flex items-center justify-center p-1 bg-slate-100 rounded-2xl">
             <button
+              type="button"
               onClick={() => setMode('single')}
-              className={`flex-1 py-1.5 rounded-xl font-bold text-xs transition-all ${
+              className={`flex-1 py-2 rounded-xl font-bold text-xs transition-all ${
                 mode === 'single' ? 'bg-white text-blue-600 shadow-xs' : 'text-slate-500 hover:text-slate-800'
               }`}
             >
               單張拍照 / 導入
             </button>
             <button
+              type="button"
               onClick={() => setMode('continuous')}
-              className={`flex-1 py-1.5 rounded-xl font-bold text-xs transition-all ${
+              className={`flex-1 py-2 rounded-xl font-bold text-xs transition-all ${
                 mode === 'continuous' ? 'bg-white text-blue-600 shadow-xs' : 'text-slate-500 hover:text-slate-800'
               }`}
             >
-              連續掃描多張
+              相簿多選連導
             </button>
             <button
+              type="button"
               onClick={() => setMode('multi')}
-              className={`flex-1 py-1.5 rounded-xl font-bold text-xs transition-all ${
+              className={`flex-1 py-2 rounded-xl font-bold text-xs transition-all ${
                 mode === 'multi' ? 'bg-white text-blue-600 shadow-xs' : 'text-slate-500 hover:text-slate-800'
               }`}
             >
@@ -329,7 +401,7 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
           <div
             onDragOver={(e) => e.preventDefault()}
             onDrop={handleDrop}
-            className="border-2 border-dashed border-slate-200 hover:border-blue-400 rounded-3xl p-5 sm:p-6 text-center bg-slate-50/50 hover:bg-blue-50/20 transition-all space-y-3"
+            className="border-2 border-dashed border-slate-200 hover:border-blue-400 rounded-3xl p-5 text-center bg-slate-50/50 hover:bg-blue-50/20 transition-all space-y-3"
           >
             <div className="w-12 h-12 mx-auto rounded-2xl bg-white shadow-sm border border-slate-200/80 flex items-center justify-center text-blue-600">
               {isProcessing ? <RotateCw className="w-6 h-6 animate-spin" /> : <Upload className="w-6 h-6" />}
@@ -337,13 +409,18 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
 
             <div>
               <p className="text-sm font-bold text-slate-800">
-                {isProcessing ? statusMessage : '拖放名片圖檔至此，或點選下方按鈕輸入'}
+                {isProcessing
+                  ? statusMessage
+                  : mode === 'multi'
+                  ? '上傳一張包含多張名片的合照，自動切分提取所有人'
+                  : '點選下方按鈕拍照，或從手機相簿一次勾選多張名片圖'}
               </p>
-              <p className="text-xs text-slate-400 mt-1">支援 JPG, PNG, WebP，可多選相簿照片或拍照</p>
+              <p className="text-xs text-slate-400 mt-1">支援 JPG, PNG, WebP・支援同框多張與相簿多選循序導入</p>
             </div>
 
             <div className="flex items-center justify-center gap-2 sm:gap-3 pt-1 flex-wrap">
               <button
+                type="button"
                 onClick={() => cameraInputRef.current?.click()}
                 disabled={isProcessing}
                 className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs flex items-center space-x-1.5 shadow-sm active:scale-95 transition-all disabled:opacity-50"
@@ -361,12 +438,13 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
               />
 
               <button
+                type="button"
                 onClick={() => fileInputRef.current?.click()}
                 disabled={isProcessing}
                 className="px-4 py-2.5 rounded-xl bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-semibold text-xs flex items-center space-x-1.5 active:scale-95 transition-all disabled:opacity-50"
               >
                 <Layers className="w-4 h-4 text-slate-500" />
-                <span>從相簿 / 檔案多選</span>
+                <span>從相簿 / 檔案多選導入</span>
               </button>
               <input
                 ref={fileInputRef}
@@ -380,157 +458,171 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
           </div>
 
           {/* 偵測到重複人脈提示 (去重與職涯合併精靈) */}
-          {duplicateTarget && (
-            <div className="bg-amber-50 border border-amber-200 p-4 rounded-2xl space-y-2 text-xs text-amber-900 animate-in fade-in">
-              <div className="flex items-center space-x-2 font-bold text-amber-800">
-                <AlertTriangle className="w-4 h-4 flex-shrink-0" />
-                <span>發現既有名片「{duplicateTarget.existing.name}」！是否要合併職涯歷程？</span>
+          {duplicateEntries.map(({ incoming, existing }) => (
+            <div
+              key={incoming.id}
+              className="bg-amber-50 border border-amber-300 p-4 rounded-2xl space-y-2 text-xs text-amber-950 animate-in fade-in"
+            >
+              <div className="flex items-center space-x-2 font-bold text-amber-900">
+                <AlertTriangle className="w-4 h-4 flex-shrink-0 text-amber-600" />
+                <span>發現同名聯絡人「{existing.name}」！</span>
               </div>
-              <p className="text-amber-700 leading-relaxed">
-                新名片公司為「{duplicateTarget.incoming.company || '未指定'}」，舊公司為「
-                {duplicateTarget.existing.company || '未指定'}」。合併後將自動歸檔舊職務至職涯歷史時間軸。
+              <p className="text-amber-800 leading-relaxed">
+                新掃描公司為「{incoming.company || '未指定'}」，既有名片公司為「
+                {existing.company || '未指定'}」。點選合併後將更新為1張名片並自動歸檔舊職務（不會產生2張重複名片）。
               </p>
-              <div className="flex space-x-2 pt-1">
+              <div className="flex flex-wrap gap-2 pt-1">
                 <button
-                  onClick={() => {
-                    const merged = mergeContacts(duplicateTarget.existing, duplicateTarget.incoming);
-                    onMergeContact(merged);
-                    // 解決問題 3：合併後必須從預覽隊列中剔除該張卡片，避免後續重複儲存！
-                    setPreviewCards((prev) => prev.filter((c) => c.id !== duplicateTarget.incoming.id));
-                    setDuplicateTarget(null);
-                    alert('已成功合併職涯履歷！');
-                  }}
-                  className="px-3.5 py-1.5 rounded-xl bg-amber-600 text-white font-semibold hover:bg-amber-700 active:scale-95 transition-all"
+                  type="button"
+                  onClick={() => handleMergeOne(incoming, existing)}
+                  className="px-3.5 py-2 rounded-xl bg-amber-600 text-white font-bold hover:bg-amber-700 active:scale-95 transition-all flex items-center space-x-1"
                 >
-                  合併並歸檔舊職務
+                  <GitMerge className="w-3.5 h-3.5" />
+                  <span>合併為 1 張名片（歸檔舊職務）</span>
                 </button>
                 <button
+                  type="button"
                   onClick={() => {
-                    onSaveNewContact(duplicateTarget.incoming);
-                    setPreviewCards((prev) => prev.filter((c) => c.id !== duplicateTarget.incoming.id));
-                    setDuplicateTarget(null);
+                    onSaveNewContact(incoming);
+                    const nextPreview = previewCards.filter((c) => c.id !== incoming.id);
+                    setPreviewCards(nextPreview);
+                    const nextDup = { ...duplicateMap };
+                    delete nextDup[incoming.id];
+                    setDuplicateMap(nextDup);
+                    if (nextPreview.length === 0) onClose();
                   }}
-                  className="px-3.5 py-1.5 rounded-xl bg-white border border-amber-300 text-amber-800 font-semibold hover:bg-amber-100 active:scale-95 transition-all"
+                  className="px-3.5 py-2 rounded-xl bg-white border border-amber-300 text-amber-900 font-semibold hover:bg-amber-100 active:scale-95 transition-all"
                 >
-                  當作新聯絡人另存
+                  保留為第 2 張獨立名片
                 </button>
               </div>
             </div>
-          )}
+          ))}
 
           {/* 辨識結果預覽清單 */}
           {previewCards.length > 0 && (
             <div className="space-y-3 pt-1">
               <div className="flex items-center justify-between text-xs font-bold text-slate-700">
-                <span>已辨識完成 ({previewCards.length} 張名片)</span>
+                <span>已辨識完成 ({previewCards.length} 位聯絡人)</span>
                 <button
-                  onClick={() => {
-                    previewCards.forEach((c) => onSaveNewContact(c));
-                    setPreviewCards([]);
-                    onClose();
-                  }}
+                  type="button"
+                  onClick={handleSaveOrMergeAll}
                   className="px-3 py-1.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 flex items-center space-x-1 shadow-sm active:scale-95 transition-all"
                 >
                   <CheckCircle2 className="w-4 h-4" />
-                  <span>全部收錄至名片庫</span>
+                  <span>全部收錄（重複自動合併）</span>
                 </button>
               </div>
 
               <div className="max-h-60 overflow-y-auto space-y-2.5 pr-1">
-                {previewCards.map((card) => (
-                  <div
-                    key={card.id}
-                    className="p-3 bg-slate-50 rounded-2xl border border-slate-200 flex items-start justify-between text-xs gap-3"
-                  >
-                    <div className="flex items-start space-x-3 min-w-0 flex-1">
-                      <div className="w-14 h-10 rounded-lg bg-blue-100 text-blue-700 font-bold flex items-center justify-center flex-shrink-0 overflow-hidden border border-slate-200">
-                        {card.thumbnailDataUrl ? (
-                          <img src={card.thumbnailDataUrl} alt={card.name} className="w-full h-full object-cover" />
-                        ) : (
-                          card.name.slice(0, 1)
-                        )}
-                      </div>
-                      <div className="space-y-1 min-w-0 flex-1">
-                        <div className="font-bold text-slate-900 flex items-center gap-1.5 flex-wrap">
-                          <span>{card.name}</span>
-                          {card.nameEn && <span className="text-slate-500 font-normal">({card.nameEn})</span>}
-                          {card.taxId && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 font-mono">
-                              統編 {card.taxId}
-                            </span>
+                {previewCards.map((card) => {
+                  const matchedExist = duplicateMap[card.id];
+                  return (
+                    <div
+                      key={card.id}
+                      className={`p-3 rounded-2xl border flex items-start justify-between text-xs gap-3 ${
+                        matchedExist ? 'bg-amber-50/60 border-amber-300' : 'bg-slate-50 border-slate-200'
+                      }`}
+                    >
+                      <div className="flex items-start space-x-3 min-w-0 flex-1">
+                        <div className="w-14 h-10 rounded-lg bg-blue-100 text-blue-700 font-bold flex items-center justify-center flex-shrink-0 overflow-hidden border border-slate-200">
+                          {card.thumbnailDataUrl ? (
+                            <img src={card.thumbnailDataUrl} alt={card.name} className="w-full h-full object-cover" />
+                          ) : (
+                            card.name.slice(0, 1)
                           )}
                         </div>
-                        <div className="text-slate-600 flex items-center gap-1 truncate">
-                          <Building2 className="w-3 h-3 text-slate-400 flex-shrink-0" />
-                          <span className="truncate">
-                            {card.company || '未偵測到公司'} {card.jobTitle && `• ${card.jobTitle}`}
-                          </span>
-                        </div>
-                        {card.phones.length > 0 && (
-                          <div className="text-slate-500 flex items-center gap-1 flex-wrap font-mono">
-                            <Phone className="w-3 h-3 text-slate-400 flex-shrink-0" />
-                            <span>
-                              {card.phones.map((p) => `${p.number}${p.extension ? ` #${p.extension}` : ''}`).join(' / ')}
+                        <div className="space-y-1 min-w-0 flex-1">
+                          <div className="font-bold text-slate-900 flex items-center gap-1.5 flex-wrap">
+                            <span>{card.name}</span>
+                            {card.nameEn && <span className="text-slate-500 font-normal">({card.nameEn})</span>}
+                            {matchedExist && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-200 text-amber-900 font-bold">
+                                同名將自動合併
+                              </span>
+                            )}
+                            {card.taxId && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 font-mono">
+                                統編 {card.taxId}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-slate-600 flex items-center gap-1 truncate">
+                            <Building2 className="w-3 h-3 text-slate-400 flex-shrink-0" />
+                            <span className="truncate">
+                              {card.company || '未偵測到公司'} {card.jobTitle && `• ${card.jobTitle}`}
                             </span>
                           </div>
-                        )}
-                        {card.emails.length > 0 && (
-                          <div className="text-slate-500 flex items-center gap-1 truncate">
-                            <Mail className="w-3 h-3 text-slate-400 flex-shrink-0" />
-                            <span className="truncate">{card.emails.join(', ')}</span>
-                          </div>
-                        )}
+                          {card.phones.length > 0 && (
+                            <div className="text-slate-500 flex items-center gap-1 flex-wrap font-mono">
+                              <Phone className="w-3 h-3 text-slate-400 flex-shrink-0" />
+                              <span>
+                                {card.phones.map((p) => `${p.number}${p.extension ? ` #${p.extension}` : ''}`).join(' / ')}
+                              </span>
+                            </div>
+                          )}
+                          {card.emails.length > 0 && (
+                            <div className="text-slate-500 flex items-center gap-1 truncate">
+                              <Mail className="w-3 h-3 text-slate-400 flex-shrink-0" />
+                              <span className="truncate">{card.emails.join(', ')}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center space-x-1.5 flex-shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (matchedExist) {
+                              handleMergeOne(card, matchedExist);
+                            } else {
+                              onSaveNewContact(card);
+                              setPreviewCards((prev) => prev.filter((c) => c.id !== card.id));
+                            }
+                          }}
+                          className={`px-3 py-1.5 rounded-xl text-white font-semibold text-xs active:scale-95 transition-all ${
+                            matchedExist ? 'bg-amber-600 hover:bg-amber-700' : 'bg-blue-600 hover:bg-blue-700'
+                          }`}
+                        >
+                          {matchedExist ? '合併' : '儲存'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPreviewCards((prev) => prev.filter((c) => c.id !== card.id));
+                          }}
+                          className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                          title="捨棄此張"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
                       </div>
                     </div>
-
-                    <div className="flex items-center space-x-1.5 flex-shrink-0">
-                      <button
-                        onClick={() => {
-                          onSaveNewContact(card);
-                          setPreviewCards((prev) => prev.filter((c) => c.id !== card.id));
-                        }}
-                        className="px-3 py-1.5 rounded-xl bg-blue-600 text-white font-semibold text-xs hover:bg-blue-700 active:scale-95 transition-all"
-                      >
-                        儲存
-                      </button>
-                      <button
-                        onClick={() => {
-                          setPreviewCards((prev) => prev.filter((c) => c.id !== card.id));
-                        }}
-                        className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                        title="捨棄此張"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
         </div>
 
         {/* 底部按鈕：鎖定底部，保證手機可隨時關閉或完成 */}
-        <div className="px-5 sm:px-6 py-3.5 bg-slate-50 border-t border-slate-100 flex items-center justify-between sticky bottom-0 z-10">
+        <div className="px-4 sm:px-6 py-3 bg-slate-50 border-t border-slate-100 flex items-center justify-between gap-3 sticky bottom-0 z-10">
           <button
             type="button"
             onClick={onClose}
-            className="px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-800 hover:bg-slate-200/60 rounded-xl transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center"
+            className="px-5 py-2.5 text-xs font-bold text-slate-700 bg-slate-200/80 hover:bg-slate-300 rounded-xl transition-colors min-h-[42px] flex items-center justify-center"
           >
             關閉視窗
           </button>
           {previewCards.length > 0 && (
             <button
               type="button"
-              onClick={() => {
-                previewCards.forEach((c) => onSaveNewContact(c));
-                setPreviewCards([]);
-                onClose();
-              }}
-              className="px-4 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-sm transition-all flex items-center space-x-1.5 min-w-[44px] min-h-[44px]"
+              onClick={handleSaveOrMergeAll}
+              className="flex-1 sm:flex-initial px-5 py-2.5 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-sm transition-all flex items-center justify-center space-x-1.5 min-h-[42px]"
             >
               <CheckCircle2 className="w-4 h-4" />
-              <span>收錄全部 ({previewCards.length})</span>
+              <span>完成並收錄全部 ({previewCards.length})</span>
             </button>
           )}
         </div>

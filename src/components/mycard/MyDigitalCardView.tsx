@@ -475,16 +475,23 @@ export const MyDigitalCardView: React.FC<MyDigitalCardViewProps> = ({
 
       {/* QR Code 放大彈窗 */}
       {showQrModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl p-8 max-w-sm w-full text-center space-y-4 shadow-2xl relative">
+        <div
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setShowQrModal(false);
+          }}
+          className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4"
+        >
+          <div className="bg-white rounded-3xl p-6 sm:p-8 max-w-sm w-full text-center space-y-4 shadow-2xl relative">
             <button
+              type="button"
               onClick={() => setShowQrModal(false)}
-              className="absolute top-4 right-4 p-2 text-slate-400 hover:text-slate-600 rounded-xl"
+              className="absolute top-4 right-4 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-xs flex items-center space-x-1"
             >
-              <X className="w-5 h-5" />
+              <X className="w-4 h-4" />
+              <span>關閉</span>
             </button>
 
-            <div className="pt-2">
+            <div className="pt-4">
               <h3 className="font-extrabold text-slate-900 text-lg">{card.name} 的名片 QR Code</h3>
               <p className="text-xs text-slate-500 mt-1">請對方打開手機原生相機掃描，立即存入通訊錄</p>
             </div>
@@ -494,6 +501,14 @@ export const MyDigitalCardView: React.FC<MyDigitalCardViewProps> = ({
             </div>
 
             <p className="text-[11px] text-slate-400">標準 vCard 3.0・跨 iPhone / Android 免安裝秒存</p>
+
+            <button
+              type="button"
+              onClick={() => setShowQrModal(false)}
+              className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-colors"
+            >
+              關閉視窗
+            </button>
           </div>
         </div>
       )}

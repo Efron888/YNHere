@@ -246,5 +246,55 @@ describe('Google Gemini API 雲端視覺引擎與一勞永逸架構 (Cloud Gemin
 
     vi.unstubAllGlobals();
   });
+
+  it('當 Gemini 回傳 { cards: [...] } 包裹物件時，也應正確展開所有同框名片', async () => {
+    const { runCloudGeminiOcr, splitOcrLinesIntoCardClusters } = await import('../src/services/ocr/ocrEngine');
+    const mockWrappedFetch = vi.fn().mockImplementation(async () => {
+      return new Response(
+        JSON.stringify({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: JSON.stringify({
+                      cards: [
+                        { name: '蔡金波', company: '矽品精密工業股份有限公司', jobTitle: '技術副理', phones: [{ type: 'mobile', number: '0972761915' }] },
+                        { name: '詹睿源', company: '矽品精密工業股份有限公司', jobTitle: '資深工程師', phones: [{ type: 'mobile', number: '0978893537' }] },
+                      ],
+                    }),
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        { status: 200 }
+      );
+    });
+    vi.stubGlobal('fetch', mockWrappedFetch);
+
+    const cards = await runCloudGeminiOcr('data:image/png;base64,abc', 'AIzaSyValidKey');
+    expect(cards.length).toBe(2);
+    expect(cards[0].name).toBe('蔡金波');
+    expect(cards[1].name).toBe('詹睿源');
+
+    // 同時驗證地端離線同框多張名片 2D 空間分群 (上下 2 張名片)
+    const clusters = splitOcrLinesIntoCardClusters(
+      [
+        { text: '矽品精密工業股份有限公司', bbox: [40, 20, 400, 50] },
+        { text: '蔡金波 技術副理', bbox: [40, 60, 300, 90] },
+        { text: '0972-761-915', bbox: [40, 100, 250, 130] },
+        // 垂直間距 420 - 130 = 290px (> 12% of 800 = 96px) -> 自動切分為第 2 張名片
+        { text: '矽品精密工業股份有限公司', bbox: [40, 420, 400, 450] },
+        { text: '詹睿源 資深工程師', bbox: [40, 460, 300, 490] },
+        { text: '0978-893-537', bbox: [40, 500, 250, 530] },
+      ],
+      { width: 600, height: 800 }
+    );
+    expect(clusters.length).toBe(2);
+
+    vi.unstubAllGlobals();
+  });
 });
 

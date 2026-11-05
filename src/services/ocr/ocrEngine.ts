@@ -407,6 +407,183 @@ export async function runLocalOcr(
 }
 
 /**
+ * 將多張同框名片的 OCR 文字行依 2D 空間聚類切分為多張獨立名片群組 (供本機離線 OCR 多名片同框使用)
+ */
+export function splitOcrLinesIntoCardClusters(
+  lines: OcrLine[],
+  imageSize: { width: number; height: number }
+): Array<{ lines: OcrLine[]; size: { width: number; height: number } }> {
+  if (lines.length < 4) {
+    return [{ lines, size: imageSize }];
+  }
+
+  // 輔助判斷：一組文字行是否具備獨立名片特徵（至少有公司/職稱/電話/Email/人名其中兩項）
+  const isValidCardCluster = (cluster: OcrLine[]): boolean => {
+    if (cluster.length < 2) return false;
+    const joined = cluster.map((l) => l.text).join(' ');
+    let signals = 0;
+    if (/公司|企業|集團|銀行|診所|事務所|工廠|股份|有限|Corp|Inc|Ltd|Co\./i.test(joined)) signals++;
+    if (/(?:09\d{2}|0[2-89][-\s]?\d{3,4}|\+886|\d{4}[-\s]\d{4})/.test(joined)) signals++;
+    if (/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/.test(joined)) signals++;
+    if (/總經理|經理|副理|總監|主任|工程師|董事長|執行長|處長|組長|課長|專員|顧問|代表|Manager|Director|Engineer/i.test(joined)) signals++;
+    return signals >= 2;
+  };
+
+  // 1. 先檢查是否為左右並排 (2 欄獨立名片) 或 2x2 網格
+  const midX = imageSize.width * 0.5;
+  const leftLines = lines.filter((l) => (l.bbox[0] + l.bbox[2]) / 2 < midX);
+  const rightLines = lines.filter((l) => (l.bbox[0] + l.bbox[2]) / 2 >= midX);
+
+  // 判斷左右兩側是否各自都有獨立的公司或電話/信箱（而非單張雙欄名片）
+  const leftHasContact = isValidCardCluster(leftLines);
+  const rightHasContact = isValidCardCluster(rightLines);
+  const bothSidesHavePhoneOrEmail =
+    leftLines.some((l) => /@|(?:09\d{2}|0[2-8][-\s]?\d{3,4})/.test(l.text)) &&
+    rightLines.some((l) => /@|(?:09\d{2}|0[2-8][-\s]?\d{3,4})/.test(l.text));
+
+  const horizontalGroups =
+    leftHasContact && rightHasContact && bothSidesHavePhoneOrEmail
+      ? [
+          {
+            lines: leftLines.map((l) => ({
+              ...l,
+              bbox: [l.bbox[0], l.bbox[1], l.bbox[2], l.bbox[3]] as [number, number, number, number],
+            })),
+            width: Math.round(midX),
+          },
+          {
+            lines: rightLines.map((l) => ({
+              ...l,
+              bbox: [
+                Math.max(0, l.bbox[0] - Math.round(midX)),
+                l.bbox[1],
+                Math.max(0, l.bbox[2] - Math.round(midX)),
+                l.bbox[3],
+              ] as [number, number, number, number],
+            })),
+            width: Math.round(imageSize.width - midX),
+          },
+        ]
+      : [{ lines, width: imageSize.width }];
+
+  // 2. 對每個水平分區，再依垂直間距 (Y 軸空白走廊) 切分上下多張名片
+  const finalClusters: Array<{ lines: OcrLine[]; size: { width: number; height: number } }> = [];
+
+  for (const hGroup of horizontalGroups) {
+    const sortedByY = [...hGroup.lines].sort((a, b) => a.bbox[1] - b.bbox[1]);
+    if (sortedByY.length === 0) continue;
+
+    // 找出顯著的垂直間隙 (大於整體高度 7% 或平均行高 2.2 倍)
+    const heights = sortedByY.map((l) => Math.max(8, l.bbox[3] - l.bbox[1]));
+    const avgLineHeight = heights.reduce((a, b) => a + b, 0) / heights.length;
+    const gapThreshold = Math.max(avgLineHeight * 2.2, imageSize.height * 0.065);
+
+    const vSubGroups: OcrLine[][] = [[sortedByY[0]]];
+    let currentMaxY = sortedByY[0].bbox[3];
+
+    for (let i = 1; i < sortedByY.length; i++) {
+      const line = sortedByY[i];
+      const gap = line.bbox[1] - currentMaxY;
+      if (gap >= gapThreshold) {
+        vSubGroups.push([line]);
+      } else {
+        vSubGroups[vSubGroups.length - 1].push(line);
+      }
+      currentMaxY = Math.max(currentMaxY, line.bbox[3]);
+    }
+
+    // 合併過小且不構成獨立名片的碎片至相鄰群組
+    const mergedVGroups: OcrLine[][] = [];
+    for (const grp of vSubGroups) {
+      if (mergedVGroups.length === 0) {
+        mergedVGroups.push(grp);
+      } else if (isValidCardCluster(grp) && isValidCardCluster(mergedVGroups[mergedVGroups.length - 1])) {
+        mergedVGroups.push(grp);
+      } else {
+        mergedVGroups[mergedVGroups.length - 1].push(...grp);
+      }
+    }
+
+    for (const grp of mergedVGroups) {
+      const minY = Math.min(...grp.map((l) => l.bbox[1]));
+      const maxY = Math.max(...grp.map((l) => l.bbox[3]));
+      const subH = Math.max(100, maxY - minY + 40);
+      const normalizedLines: OcrLine[] = grp.map((l) => ({
+        ...l,
+        bbox: [l.bbox[0], Math.max(0, l.bbox[1] - minY + 20), l.bbox[2], Math.max(0, l.bbox[3] - minY + 20)],
+      }));
+      finalClusters.push({
+        lines: normalizedLines,
+        size: { width: hGroup.width, height: subH },
+      });
+    }
+  }
+
+  return finalClusters.length > 0 ? finalClusters : [{ lines, size: imageSize }];
+}
+
+/**
+ * 引擎 A (多名片同框版): 支援單張與多張同框之本機離線 OCR
+ */
+export async function runLocalOcrMulti(
+  imageSource: Blob | File | string,
+  imageDimensions: { width: number; height: number }
+): Promise<ParsedCardFields[]> {
+  const worker = await getTesseractWorker();
+  const prepared = await prepareDualZoneImages(imageSource, imageDimensions);
+
+  await worker.setParameters({ tessedit_pageseg_mode: '3' as unknown as Tesseract.PSM });
+  const fullRet = await worker.recognize(
+    prepared.fullSource,
+    { rotateAuto: true },
+    { text: true, blocks: true }
+  );
+  const fullLines = extractOcrLinesFromTesseractPage(fullRet.data, {
+    width: prepared.width,
+    height: prepared.height,
+  });
+
+  const clusters = splitOcrLinesIntoCardClusters(fullLines, {
+    width: prepared.width,
+    height: prepared.height,
+  });
+
+  // 若偵測到同框有 2 張以上名片，對每個聚類分別執行 2D 空間幾何解析
+  if (clusters.length >= 2) {
+    return clusters.map((c) => parseSpatialLayout(c.lines, c.size));
+  }
+
+  // 若為單張名片，補上右欄專區強化掃描以獲得最高精準度
+  const combinedLines: OcrLine[] = [...fullLines];
+  if (prepared.rightZoneSource) {
+    try {
+      await worker.setParameters({ tessedit_pageseg_mode: '6' as unknown as Tesseract.PSM });
+      const rightRet = await worker.recognize(
+        prepared.rightZoneSource,
+        { rotateAuto: true },
+        { text: true, blocks: true }
+      );
+      const rightLines = extractOcrLinesFromTesseractPage(
+        rightRet.data,
+        { width: Math.round(prepared.width * 0.65), height: prepared.height },
+        prepared.rightOffsetX,
+        prepared.rightOffsetY
+      );
+      combinedLines.push(...rightLines);
+    } catch {
+      // 忽略右欄失敗
+    }
+  }
+
+  return [
+    parseSpatialLayout(combinedLines, {
+      width: prepared.width,
+      height: prepared.height,
+    }),
+  ];
+}
+
+/**
  * 動態從 Google Generative Language API 獲取當前 API Key 支援的所有生成模型清單
  * （達成一勞永逸：當未來 Google 推出新版如 gemini-3.0 時，無需更新程式碼即可自動出現在選單中）
  */
@@ -627,7 +804,25 @@ export async function runCloudGeminiOcr(
         textOutput = textOutput.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
 
         const rawParsed = JSON.parse(textOutput);
-        const parsedItems = Array.isArray(rawParsed) ? rawParsed : [rawParsed];
+        let parsedItems: Array<Record<string, unknown>> = [];
+        if (Array.isArray(rawParsed)) {
+          parsedItems = rawParsed;
+        } else if (rawParsed && typeof rawParsed === 'object') {
+          // 防呆：若 Gemini 在 JSON 模式下以 { cards: [...] } 或 { contacts: [...] } 包裹陣列，自動解包取出陣列
+          const nestedArray = Object.values(rawParsed).find(
+            (v) =>
+              Array.isArray(v) &&
+              v.length > 0 &&
+              typeof v[0] === 'object' &&
+              v[0] !== null &&
+              ('name' in v[0] || 'company' in v[0] || 'phones' in v[0])
+          );
+          if (Array.isArray(nestedArray)) {
+            parsedItems = nestedArray as Array<Record<string, unknown>>;
+          } else {
+            parsedItems = [rawParsed as Record<string, unknown>];
+          }
+        }
 
         const results: ParsedCardFields[] = parsedItems.map((item) => {
           const normalizedPhones = Array.isArray(item?.phones)
@@ -651,16 +846,16 @@ export async function runCloudGeminiOcr(
             : [];
 
           return {
-            name: item?.name || '未命名聯絡人',
-            nameEn: item?.nameEn || '',
-            company: item?.company || '',
-            department: item?.department || '',
-            jobTitle: item?.jobTitle || '',
-            taxId: normalizeTaiwanTaxId(item?.taxId || ''),
+            name: String(item?.name || '未命名聯絡人'),
+            nameEn: String(item?.nameEn || ''),
+            company: String(item?.company || ''),
+            department: String(item?.department || ''),
+            jobTitle: String(item?.jobTitle || ''),
+            taxId: normalizeTaiwanTaxId(String(item?.taxId || '')),
             phones: normalizedPhones,
-            emails: Array.isArray(item?.emails) ? item.emails : [],
-            websites: Array.isArray(item?.websites) ? item.websites : [],
-            addresses: Array.isArray(item?.addresses) ? item.addresses : [],
+            emails: Array.isArray(item?.emails) ? (item.emails as string[]) : [],
+            websites: Array.isArray(item?.websites) ? (item.websites as string[]) : [],
+            addresses: Array.isArray(item?.addresses) ? (item.addresses as string[]) : [],
           };
         });
 
@@ -723,8 +918,7 @@ export async function recognizeBusinessCardsFromImage(
 
     parsedList = await runCloudGeminiOcr(base64, settings.geminiApiKey, settings.modelName);
   } else {
-    const single = await runLocalOcr(imageSource, imageDimensions);
-    parsedList = [single];
+    parsedList = await runLocalOcrMulti(imageSource, imageDimensions);
   }
 
   if (parsedList.length === 0) {
