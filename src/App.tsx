@@ -682,7 +682,15 @@ export function App() {
                     onToggleSelect={toggleSelect}
                     onClickDetail={(c) => setDetailContact(c)}
                     onQuickShare={(c) => {
-                      setSelectedIds(new Set([c.id]));
+                      setSelectedIds((prev) => {
+                        if (prev.size > 1 && prev.has(c.id)) return new Set(prev);
+                        if (isMultiSelectMode && prev.size >= 1) {
+                          const next = new Set(prev);
+                          next.add(c.id);
+                          return next;
+                        }
+                        return new Set([c.id]);
+                      });
                       setIsExchangeOpen(true);
                     }}
                   />

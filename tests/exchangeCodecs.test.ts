@@ -44,18 +44,19 @@ describe('vCard 3.0 編解碼器 (vcardCodec)', () => {
     expect(vcfString).toContain('FN:王大明');
     expect(vcfString).toContain('ORG:台灣微軟股份有限公司;雲端架構處');
     expect(vcfString).toContain('TITLE:資深解決方案架構師');
-    expect(vcfString).toContain('X-YNHERE-TAXID:22099131');
+    expect(vcfString).toContain('統編: 22099131');
 
     const imported = importFromVCard(vcfString);
     expect(imported.length).toBe(1);
     expect(imported[0].name).toBe('王大明');
+    expect(imported[0].nameEn).toBe('David Wang');
     expect(imported[0].company).toBe('台灣微軟股份有限公司');
     expect(imported[0].taxId).toBe('22099131');
     expect(imported[0].phones.length).toBe(2);
     expect(imported[0].emails).toContain('david.wang@microsoft.com');
   });
 
-  it('多張名片勾選或全選應合併於單一 vcf 檔案中，且不含未跳脫之 JSON 冒號或電話逗號以防手機通訊錄只導入 1 人', () => {
+  it('多張名片勾選或全選應合併於單一 vcf 檔案中，且完全符合 Apple iOS 標準 (不含非標準 X-* 或 TEL 分機參數) 以防手機通訊錄只導入 1 人', () => {
     const c1 = createDummyContact({
       name: '劉景文',
       ribbon: { status: 'none', taskTitle: '' },
@@ -68,10 +69,10 @@ describe('vCard 3.0 編解碼器 (vcardCodec)', () => {
       name: '蔡金波',
     });
     const vcf = exportToVCard([c1, c2, c3]);
-    // 確保 X-YNHERE-RIBBON 已進行 URI 安全編碼，不含原始 JSON 的 {"status":
-    expect(vcf).not.toContain('X-YNHERE-RIBBON:{"');
-    // 確保 TEL 行不含逗號 ,101，分機改由 X-EXT 標記
-    expect(vcf).toContain('X-EXT=101:02-2345-6789');
+    // 確保完全不含非標準 X-YNHERE-* 屬性或 TEL;...;X-EXT= 參數，確保 iOS 17/18 CNContactVCardSerialization 100% 批次匯入
+    expect(vcf).not.toContain('X-YNHERE-');
+    expect(vcf).not.toContain('X-EXT=');
+    expect(vcf).toContain('TEL;TYPE=WORK,VOICE:02-2345-6789');
 
     const imported = importFromVCard(vcf);
     expect(imported.length).toBe(3);

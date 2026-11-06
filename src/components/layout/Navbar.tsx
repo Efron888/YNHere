@@ -95,7 +95,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenExchange, onOpenSettings, 
             <div className="flex items-center space-x-1.5">
               <span className="font-extrabold text-slate-900 text-base sm:text-lg tracking-tight">YNHere</span>
               <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-blue-100 text-blue-800">
-                v2.4
+                v2.5
               </span>
             </div>
             <p className="text-[10px] text-slate-500 hidden sm:block -mt-1">跨平台智慧名片管理・Local-First</p>
