@@ -12,6 +12,8 @@ import {
   Smartphone,
   CheckSquare,
   Square,
+  ArrowRight,
+  UserPlus,
 } from 'lucide-react';
 import { ContactCard, PhoneItem } from '../../types/contact';
 import { exportToVCard, importFromVCard } from '../../services/exchange/vcardCodec';
@@ -43,6 +45,10 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
   const [internalSelectedIds, setInternalSelectedIds] = useState<Set<string>>(
     () => new Set(selectedContacts.map((c) => c.id))
   );
+  // iPhone 連續接力新增聯絡人狀態 (解決 iOS Safari 單次 .vcf 只彈出 1 人就停止的系統限制)
+  const [relayIndex, setRelayIndex] = useState<number>(0);
+  const [addedIds, setAddedIds] = useState<Set<string>>(new Set());
+
   const [shareLinkCopied, setShareLinkCopied] = useState(false);
   const [shareError, setShareError] = useState('');
 
@@ -54,6 +60,8 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
     if (isOpen) {
       setInternalSelectedIds(new Set(selectedContacts.map((c) => c.id)));
       setExportScope(selectedContacts.length > 0 ? 'selected' : 'all');
+      setRelayIndex(0);
+      setAddedIds(new Set());
       setShareError('');
     }
   }, [isOpen, selectedContacts]);
@@ -68,6 +76,8 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
       next.add(id);
     }
     setInternalSelectedIds(next);
+    setRelayIndex(0);
+    setAddedIds(new Set());
     if (next.size > 0) {
       setExportScope('selected');
     }
@@ -76,37 +86,70 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
   const chosenContacts = allContacts.filter((c) => internalSelectedIds.has(c.id));
   const targets = exportScope === 'selected' && chosenContacts.length > 0 ? chosenContacts : allContacts;
 
-  // 1A. 透過系統原生分享將多筆 .vcf 直接導入手機「通訊錄」App (解決 iOS Safari 預覽器只導入第 1 人的限制)
+  // 1A. 單筆直接喚起 iPhone / Android 原生「新增聯絡人」視窗，並自動推進至下一位接力
+  const triggerSingleContactAdd = (contact: ContactCard, indexInTargets?: number) => {
+    const vcf = exportToVCard([contact]);
+    const blob = new Blob([vcf], { type: 'text/vcard;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${contact.name || 'contact'}.vcf`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+
+    setAddedIds((prev) => {
+      const next = new Set(prev);
+      next.add(contact.id);
+      return next;
+    });
+
+    if (typeof indexInTargets === 'number') {
+      setRelayIndex(indexInTargets + 1);
+    }
+    resetUnbackedCount(allContacts.length);
+  };
+
+  // 1B. 透過系統原生分享將多筆 .vcf 檔案分享至「通訊錄」或「儲存到檔案」
+  // 關鍵修復：絕對不可傳入 title 或 text，否則 iOS UIActivityViewController 會因包含純文字而將「通訊錄」App 從分享選單隱藏！
   const handleShareVcfToPhone = async () => {
     if (targets.length === 0) {
       alert('目前沒有可匯出的聯絡人！');
       return;
     }
+
+    // 若只有 1 人，直接觸發單人原生新增畫面最快
+    if (targets.length === 1) {
+      triggerSingleContactAdd(targets[0], 0);
+      return;
+    }
+
     const vcf = exportToVCard(targets);
     const fileName = `contacts-${targets.length}.vcf`;
 
     try {
-      const file = new File([vcf], fileName, { type: 'text/vcard;charset=utf-8' });
+      const blob = new Blob([vcf], { type: 'text/vcard' });
+      const file = new File([blob], fileName, { type: 'text/vcard' });
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        // 僅傳遞 { files: [file] }，不夾帶 text / title，確保 iOS 分享選單保留「通訊錄」與「儲存到檔案」
         await navigator.share({
           files: [file],
-          title: `匯入 ${targets.length} 位聯絡人至通訊錄`,
-          text: `請於選單中點選「通訊錄 (Contacts)」即可一次導入全部 ${targets.length} 位聯絡人`,
         });
         resetUnbackedCount(allContacts.length);
         return;
       }
     } catch (err) {
-      // 若使用者取消分享則不強制下載；若不支援則自動改用標準檔案下載
       if (err instanceof Error && err.name === 'AbortError') {
         return;
       }
     }
 
-    handleExportVcf();
+    // 若環境不支援 navigator.share，自動啟動第 1 位新增並引導接力
+    triggerSingleContactAdd(targets[0], 0);
   };
 
-  // 1B. 下載 vCard (.vcf) 檔案
+  // 1C. 下載多筆合併 .vcf 檔案 (若在 iPhone 點擊，同時自動推進接力進度，讓使用者存完第 1 人回來能直接點第 2 人！)
   const handleExportVcf = () => {
     if (targets.length === 0) {
       alert('目前沒有可匯出的聯絡人！');
@@ -122,6 +165,17 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
     a.click();
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 60000);
+
+    // 若在 iPhone Safari 點擊下載 .vcf，Safari 只會預覽第 1 筆，因此同步將第 1 筆標為已開啟並準備好第 2 筆接力按鈕
+    if (targets.length >= 2 && relayIndex === 0) {
+      setAddedIds((prev) => {
+        const next = new Set(prev);
+        next.add(targets[0].id);
+        return next;
+      });
+      setRelayIndex(1);
+    }
+
     resetUnbackedCount(allContacts.length);
   };
 
@@ -368,6 +422,8 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
     }
   };
 
+  const currentRelayContact = targets[relayIndex] || null;
+
   return (
     <div
       onClick={(e) => {
@@ -399,7 +455,7 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
         </div>
 
         {/* 滾動內容區 */}
-        <div className="p-4 sm:p-6 overflow-y-auto space-y-5 flex-1 text-xs">
+        <div className="p-4 sm:p-6 overflow-y-auto space-y-4 flex-1 text-xs">
           {/* 分頁切換 */}
           <div className="grid grid-cols-3 gap-1.5 bg-slate-100 p-1.5 rounded-2xl text-xs font-bold">
             <button
@@ -431,7 +487,7 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
             </button>
           </div>
 
-          {/* 匯出與分享共用的名片選擇器 (解決手機端快速選取單張或多張名片需求) */}
+          {/* 匯出與分享共用的名片選擇器 */}
           {(activeTab === 'export' || activeTab === 'share') && (
             <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200/80 space-y-2.5">
               <div className="flex items-center justify-between flex-wrap gap-2">
@@ -439,7 +495,11 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => setExportScope('all')}
+                    onClick={() => {
+                      setExportScope('all');
+                      setRelayIndex(0);
+                      setAddedIds(new Set());
+                    }}
                     className={`px-2.5 py-1 rounded-lg font-bold transition-all ${
                       exportScope === 'all'
                         ? 'bg-blue-600 text-white shadow-xs'
@@ -450,7 +510,11 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
                   </button>
                   <button
                     type="button"
-                    onClick={() => setExportScope('selected')}
+                    onClick={() => {
+                      setExportScope('selected');
+                      setRelayIndex(0);
+                      setAddedIds(new Set());
+                    }}
                     className={`px-2.5 py-1 rounded-lg font-bold transition-all ${
                       exportScope === 'selected'
                         ? 'bg-blue-600 text-white shadow-xs'
@@ -465,7 +529,7 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
               {exportScope === 'selected' && (
                 <div className="space-y-1.5 pt-1 border-t border-slate-200/60">
                   <div className="flex items-center justify-between text-[11px] text-slate-500">
-                    <span>請點選要匯出或分享的名片：</span>
+                    <span>請點選要導入或分享的名片：</span>
                     <button
                       type="button"
                       onClick={() => {
@@ -474,13 +538,15 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
                         } else {
                           setInternalSelectedIds(new Set(allContacts.map((c) => c.id)));
                         }
+                        setRelayIndex(0);
+                        setAddedIds(new Set());
                       }}
                       className="text-blue-600 font-bold hover:underline"
                     >
                       {internalSelectedIds.size === allContacts.length ? '取消全選' : '全選全部'}
                     </button>
                   </div>
-                  <div className="max-h-36 overflow-y-auto space-y-1 pr-1">
+                  <div className="max-h-32 overflow-y-auto space-y-1 pr-1">
                     {allContacts.map((c) => {
                       const checked = internalSelectedIds.has(c.id);
                       return (
@@ -488,7 +554,7 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
                           key={c.id}
                           type="button"
                           onClick={() => toggleInternalId(c.id)}
-                          className={`w-full px-3 py-2 rounded-xl border text-left flex items-center justify-between transition-all ${
+                          className={`w-full px-3 py-1.5 rounded-xl border text-left flex items-center justify-between transition-all ${
                             checked
                               ? 'bg-blue-50/80 border-blue-400 text-blue-900 font-bold'
                               : 'bg-white border-slate-200 text-slate-700'
@@ -514,27 +580,136 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
 
           {/* 分頁 1: 匯出 / 導入至手機通訊錄 */}
           {activeTab === 'export' && (
-            <div className="space-y-2.5">
-              {/* 手機原生分享直通通訊錄 (解決 iOS Safari 預覽 .vcf 只導入 1 人的限制) */}
-              <button
-                type="button"
-                onClick={handleShareVcfToPhone}
-                className="w-full p-4 rounded-2xl border-2 border-blue-400 hover:border-blue-600 bg-blue-50/70 hover:bg-blue-100/60 flex items-center justify-between transition-all group shadow-xs"
-              >
-                <div className="flex items-center space-x-3 text-left">
-                  <div className="p-2.5 rounded-xl bg-blue-600 text-white shadow-sm group-hover:scale-105 transition-transform">
-                    <Smartphone className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <div className="font-extrabold text-blue-950 text-sm">
-                      📲 一鍵導入手機通訊錄 (共 {targets.length} 人)
+            <div className="space-y-3">
+              {/* 核心功能：iPhone / Android 直接彈出手機「新增聯絡人」視窗接力器 (100% 解決 iPhone Safari 只新增 1 個人就停的問題) */}
+              <div className="p-4 rounded-2xl border-2 border-blue-500 bg-blue-50/80 space-y-3 shadow-xs">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2">
+                    <div className="p-2 rounded-xl bg-blue-600 text-white shadow-xs">
+                      <UserPlus className="w-4 h-4" />
                     </div>
-                    <div className="text-xs text-blue-700 mt-0.5">
-                      彈出選單後點選「通訊錄 (Contacts)」，即可一次存入全部 {targets.length} 位聯絡人！
+                    <div>
+                      <div className="font-extrabold text-blue-950 text-sm">
+                        📱 iPhone / 手機直接存入通訊錄 (共 {targets.length} 人)
+                      </div>
+                      <div className="text-[11px] text-blue-700">
+                        因為 iPhone Safari 每次只允許彈出 1 位聯絡人視窗，存完第 1 位後直接點下方按鈕就會自動彈出下一位！
+                      </div>
                     </div>
                   </div>
                 </div>
-                <Share2 className="w-4 h-4 text-blue-600 flex-shrink-0" />
+
+                {/* 主接力大按鈕 */}
+                {targets.length > 0 && currentRelayContact ? (
+                  <button
+                    type="button"
+                    onClick={() => triggerSingleContactAdd(currentRelayContact, relayIndex)}
+                    className={`w-full py-3.5 px-4 rounded-2xl font-extrabold text-sm text-white shadow-md flex items-center justify-between transition-all active:scale-98 ${
+                      relayIndex === 0
+                        ? 'bg-blue-600 hover:bg-blue-700'
+                        : 'bg-emerald-600 hover:bg-emerald-700 ring-4 ring-emerald-200 animate-pulse'
+                    }`}
+                  >
+                    <div className="flex items-center space-x-2 text-left min-w-0">
+                      <Smartphone className="w-5 h-5 flex-shrink-0" />
+                      <span className="truncate">
+                        {relayIndex === 0
+                          ? `點此開始：存入第 1 / ${targets.length} 位「${currentRelayContact.name}」`
+                          : `👉 繼續存入第 ${relayIndex + 1} / ${targets.length} 位：「${currentRelayContact.name}」`}
+                      </span>
+                    </div>
+                    <ArrowRight className="w-5 h-5 flex-shrink-0 ml-2" />
+                  </button>
+                ) : targets.length > 0 ? (
+                  <div className="p-3 rounded-xl bg-emerald-100 border border-emerald-300 text-emerald-900 font-bold text-center flex items-center justify-center justify-between">
+                    <span>🎉 已完成全部 {targets.length} 位聯絡人彈出新增！</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRelayIndex(0);
+                        setAddedIds(new Set());
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-white text-emerald-800 text-[11px] border border-emerald-300"
+                    >
+                      重新從第 1 位開始
+                    </button>
+                  </div>
+                ) : null}
+
+                {/* 多人名單逐一快速點擊列 */}
+                {targets.length >= 2 && (
+                  <div className="space-y-1.5 pt-1 border-t border-blue-200/70">
+                    <div className="flex items-center justify-between text-[11px] font-bold text-blue-900">
+                      <span>或直接點擊下方個別名片立即彈出 iPhone 新增聯絡人畫面：</span>
+                      <span className="font-mono">
+                        進度 {addedIds.size} / {targets.length}
+                      </span>
+                    </div>
+                    <div className="max-h-40 overflow-y-auto space-y-1.5 pr-1">
+                      {targets.map((c, idx) => {
+                        const isDone = addedIds.has(c.id);
+                        const isCurrent = idx === relayIndex;
+                        return (
+                          <button
+                            key={c.id}
+                            type="button"
+                            onClick={() => triggerSingleContactAdd(c, idx)}
+                            className={`w-full px-3 py-2 rounded-xl border text-left flex items-center justify-between transition-all ${
+                              isCurrent
+                                ? 'bg-amber-50 border-amber-400 text-amber-950 font-extrabold shadow-xs'
+                                : isDone
+                                ? 'bg-emerald-50/70 border-emerald-300 text-emerald-900 font-semibold'
+                                : 'bg-white border-blue-200 hover:border-blue-400 text-slate-800 font-semibold'
+                            }`}
+                          >
+                            <div className="flex items-center space-x-2 truncate pr-2">
+                              <span className="w-5 h-5 rounded-full bg-slate-100 text-slate-700 text-[10px] font-bold flex items-center justify-center flex-shrink-0">
+                                {idx + 1}
+                              </span>
+                              <span className="truncate">{c.name}</span>
+                              {c.company && (
+                                <span className="text-[10px] text-slate-500 truncate">• {c.company}</span>
+                              )}
+                            </div>
+                            <span
+                              className={`px-2.5 py-1 rounded-lg text-[11px] font-bold flex-shrink-0 ${
+                                isDone
+                                  ? 'bg-emerald-600 text-white'
+                                  : isCurrent
+                                  ? 'bg-amber-500 text-slate-950'
+                                  : 'bg-blue-600 text-white'
+                              }`}
+                            >
+                              {isDone ? '✓ 已開啟 (再點重開)' : '＋ 存入通訊錄'}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* 進階：打包單一 .vcf 透過「儲存到檔案」一次批量匯入 */}
+              <button
+                type="button"
+                onClick={handleShareVcfToPhone}
+                className="w-full p-3.5 rounded-2xl border border-slate-200 hover:border-blue-400 bg-slate-50/50 hover:bg-blue-50/30 flex items-center justify-between transition-all group"
+              >
+                <div className="flex items-center space-x-3 text-left">
+                  <div className="p-2 rounded-xl bg-white text-blue-600 shadow-sm border border-slate-200">
+                    <Share2 className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="font-bold text-slate-900 text-sm">
+                      進階：分享打包 .vcf 檔 (共 {targets.length} 人)
+                    </div>
+                    <div className="text-[11px] text-slate-500 leading-relaxed">
+                      iPhone 點此選「儲存到檔案」➔ 再打開 iPhone「檔案」App 點擊該檔，即可按「加入全部 {targets.length} 位聯絡人」
+                    </div>
+                  </div>
+                </div>
+                <Download className="w-4 h-4 text-slate-400 group-hover:text-blue-600 flex-shrink-0" />
               </button>
 
               <button
@@ -548,11 +723,9 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
                   </div>
                   <div>
                     <div className="font-bold text-slate-900 text-sm">
-                      下載 .vcf 通訊錄檔案 (共 {targets.length} 人)
+                      下載合併 .vcf 通訊錄檔 (共 {targets.length} 人)
                     </div>
-                    <div className="text-[11px] text-slate-500">
-                      若手機瀏覽器預覽只顯示第 1 人，請點預覽畫面右上角「分享 ➔ 通訊錄」即可全部導入
-                    </div>
+                    <div className="text-[11px] text-slate-500">適合電腦版、Android 或 iCloud 通訊錄匯入</div>
                   </div>
                 </div>
                 <Download className="w-4 h-4 text-slate-400 group-hover:text-blue-600 flex-shrink-0" />
