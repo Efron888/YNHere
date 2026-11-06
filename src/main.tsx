@@ -4,7 +4,7 @@ import App from './App';
 import './index.css';
 
 // 自動破除手機舊版 PWA Service Worker 快取，確保每次部署都能載入最新程式碼
-const APP_BUILD_VERSION = '2026.11.05.v2.2';
+const APP_BUILD_VERSION = '2026.11.06.v2.3';
 if (typeof window !== 'undefined') {
   const savedVersion = localStorage.getItem('ynhere_app_version');
   if (savedVersion !== APP_BUILD_VERSION) {

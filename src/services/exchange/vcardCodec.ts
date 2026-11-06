@@ -56,84 +56,119 @@ function decodeVCardValue(propHeader: string, rawVal: string): string {
 }
 
 /**
+ * 清理並跳脫 vCard 3.0 欄位文字，防止換行或特殊符號破壞多筆聯絡人結構
+ */
+function escapeVCardText(text: string | undefined | null): string {
+  if (!text) return '';
+  return text
+    .replace(/\r\n|\r|\n/g, '\\n')
+    .trim();
+}
+
+/**
  * 匯出為 vCard 3.0 (高相容性標準，支援 iPhone / Android 多筆聯絡人一次匯入)
+ * 特別針對 iOS / Android 原生通訊錄解析器優化：
+ * 1. 移除未跳脫之 JSON 冒號/雙引號 (改用 URI 安全編碼)，避免 Android VCardParser 於第 2 張名片中斷。
+ * 2. 電話號碼保持純淨撥號格式，避免逗號造成部分手機通訊錄解析失敗。
+ * 3. 每張 VCARD 及檔尾皆以標準 CRLF (\r\n) 結尾。
  */
 export function exportToVCard(contacts: ContactCard[]): string {
   const cards: string[] = [];
 
   for (const c of contacts) {
-    const cleanName = (c.name || '未命名聯絡人').trim();
+    const cleanName = escapeVCardText(c.name || '未命名聯絡人');
     const lastName = cleanName.length >= 2 ? cleanName.slice(0, 1) : cleanName;
     const firstName = cleanName.length >= 2 ? cleanName.slice(1) : '';
 
     const lines: string[] = [
       'BEGIN:VCARD',
       'VERSION:3.0',
-      'PRODID:-//YNHere//Business Card Manager//ZH',
       `FN:${cleanName}`,
       `N:${lastName};${firstName};;;`,
     ];
 
     if (c.nameEn) {
-      lines.push(`X-YNHERE-NAME-EN:${c.nameEn}`);
+      lines.push(`X-YNHERE-NAME-EN:${escapeVCardText(c.nameEn)}`);
     }
 
     if (c.company || c.department) {
-      lines.push(`ORG:${c.company || ''};${c.department || ''}`);
+      lines.push(`ORG:${escapeVCardText(c.company)};${escapeVCardText(c.department)}`);
     }
 
     if (c.jobTitle) {
-      lines.push(`TITLE:${c.jobTitle}`);
+      lines.push(`TITLE:${escapeVCardText(c.jobTitle)}`);
     }
 
     if (c.taxId) {
-      lines.push(`X-YNHERE-TAXID:${c.taxId}`);
+      lines.push(`X-YNHERE-TAXID:${escapeVCardText(c.taxId)}`);
     }
 
-    // 電話
+    // 電話 (維持純淨號碼以確保 iOS / Android 通訊錄 100% 讀取所有聯絡人)
+    const extNotes: string[] = [];
     for (const p of c.phones) {
       const type = p.type === 'mobile' ? 'CELL' : p.type === 'fax' ? 'FAX' : 'WORK';
-      const dial = p.normalizedDialString || p.number;
-      lines.push(`TEL;TYPE=${type}:${dial}`);
+      const cleanNum = (p.number || p.normalizedDialString || '').split(',')[0].trim();
+      if (!cleanNum) continue;
+      if (p.extension) {
+        lines.push(`TEL;TYPE=${type};X-EXT=${escapeVCardText(p.extension)}:${cleanNum}`);
+        extNotes.push(`${cleanNum} 分機 ${p.extension}`);
+      } else {
+        lines.push(`TEL;TYPE=${type}:${cleanNum}`);
+      }
     }
 
     // Email
     for (const e of c.emails) {
-      lines.push(`EMAIL;TYPE=INTERNET:${e}`);
+      if (e.trim()) {
+        lines.push(`EMAIL;TYPE=INTERNET:${escapeVCardText(e)}`);
+      }
     }
 
     // URL
     for (const w of c.websites) {
-      lines.push(`URL:${w}`);
+      if (w.trim()) {
+        lines.push(`URL:${escapeVCardText(w)}`);
+      }
     }
 
     // 地址
     for (const addr of c.addresses) {
-      lines.push(`ADR;TYPE=WORK:;;${addr};;;;`);
+      if (addr.trim()) {
+        lines.push(`ADR;TYPE=WORK:;;${escapeVCardText(addr).replace(/;/g, ',')};;;;`);
+      }
     }
 
     // 標籤
     if (c.tags.length > 0) {
-      lines.push(`CATEGORIES:${c.tags.join(',')}`);
+      lines.push(`CATEGORIES:${c.tags.map((t) => escapeVCardText(t)).join(',')}`);
     }
 
-    // Ribbon
+    // Ribbon (使用 encodeURIComponent 避免冒號與雙引號導致 Android 通訊錄解析器崩潰)
     if (c.ribbon && c.ribbon.status !== 'none') {
-      lines.push(`X-YNHERE-RIBBON:${JSON.stringify(c.ribbon)}`);
+      lines.push(`X-YNHERE-RIBBON:${encodeURIComponent(JSON.stringify(c.ribbon))}`);
     }
 
-    // 備註
+    // 備註 (整合時間軸與分機資訊)
+    const noteParts: string[] = [];
+    if (c.taxId) {
+      noteParts.push(`統編: ${c.taxId}`);
+    }
+    if (extNotes.length > 0) {
+      noteParts.push(`分機: ${extNotes.join(' / ')}`);
+    }
     if (c.timelineNotes.length > 0) {
-      const notesSummary = c.timelineNotes.map((n) => `[${n.createdAt.slice(0, 10)}] ${n.content}`).join('\\n');
-      lines.push(`NOTE:${notesSummary}`);
+      noteParts.push(...c.timelineNotes.map((n) => `[${n.createdAt.slice(0, 10)}] ${escapeVCardText(n.content)}`));
+    }
+    if (noteParts.length > 0) {
+      lines.push(`NOTE:${noteParts.join('\\n')}`);
     }
 
     lines.push('END:VCARD');
     cards.push(lines.join('\r\n'));
   }
 
-  // RFC 2426 標準：多筆 VCARD 之間以單一 CRLF 銜接，確保 iOS / Android 完整讀取所有聯絡人而不中斷於第一筆
-  return cards.join('\r\n');
+  // RFC 2426 標準：多筆 VCARD 之間以單一 CRLF 銜接，且檔尾以 CRLF 結束
+  return cards.length > 0 ? cards.join('\r\n') + '\r\n' : '';
 }
 
 /**
@@ -143,12 +178,12 @@ export function generateCompactVCardForQr(c: ContactCard): string {
   const lines: string[] = [
     'BEGIN:VCARD',
     'VERSION:3.0',
-    `FN:${c.name}`,
-    `ORG:${c.company}`,
+    `FN:${escapeVCardText(c.name)}`,
+    `ORG:${escapeVCardText(c.company)}`,
   ];
 
-  if (c.jobTitle) lines.push(`TITLE:${c.jobTitle}`);
-  if (c.taxId) lines.push(`X-TAXID:${c.taxId}`);
+  if (c.jobTitle) lines.push(`TITLE:${escapeVCardText(c.jobTitle)}`);
+  if (c.taxId) lines.push(`X-TAXID:${escapeVCardText(c.taxId)}`);
 
   // 手機優先，最多放兩支電話
   const phones = [...c.phones].sort((a) => (a.type === 'mobile' ? -1 : 1)).slice(0, 2);
@@ -164,7 +199,7 @@ export function generateCompactVCardForQr(c: ContactCard): string {
 
   // 最多 1 個地址
   if (c.addresses.length > 0) {
-    lines.push(`ADR:;;${c.addresses[0]};;;;`);
+    lines.push(`ADR:;;${escapeVCardText(c.addresses[0]).replace(/;/g, ',')};;;;`);
   }
 
   lines.push('END:VCARD');
@@ -177,7 +212,8 @@ export function generateCompactVCardForQr(c: ContactCard): string {
  */
 export function importFromVCard(vcfString: string): ContactCard[] {
   const contacts: ContactCard[] = [];
-  const rawCards = vcfString
+  const cleanedVcf = vcfString.replace(/^\uFEFF/, '').replace(/\0/g, '');
+  const rawCards = cleanedVcf
     .split(/BEGIN:VCARD/i)
     .map((s) => s.trim())
     .filter((s) => s.length > 0 && /END:VCARD/i.test(s));
@@ -188,19 +224,31 @@ export function importFromVCard(vcfString: string): ContactCard[] {
     const unfoldedLines: string[] = [];
     for (let i = 0; i < rawLines.length; i++) {
       const line = rawLines[i];
-      if (!line.trim()) continue;
+      const trimmed = line.trim();
+      if (!trimmed) continue;
 
-      if (unfoldedLines.length > 0 && (line.startsWith(' ') || line.startsWith('\t'))) {
-        unfoldedLines[unfoldedLines.length - 1] += line.slice(1);
-      } else if (
-        unfoldedLines.length > 0 &&
-        unfoldedLines[unfoldedLines.length - 1].endsWith('=') &&
-        /QUOTED-PRINTABLE/i.test(unfoldedLines[unfoldedLines.length - 1])
+      const prevLine = unfoldedLines.length > 0 ? unfoldedLines[unfoldedLines.length - 1] : '';
+      const isNewPropLine =
+        /^END:VCARD/i.test(trimmed) ||
+        /^(?:item\d+\.)?(?:FN|N|ORG|TITLE|TEL|EMAIL|URL|ADR|NOTE|PHOTO|CATEGORIES|VERSION|UID|REV|BDAY|X-[A-Z0-9-]+)(?:;[^:]*)?:/i.test(
+          trimmed
+        );
+
+      // 優先檢查 Quoted-Printable 軟換行 (行尾為 = 且下一行不是新屬性)
+      if (
+        prevLine &&
+        prevLine.endsWith('=') &&
+        /QUOTED-PRINTABLE/i.test(prevLine) &&
+        !isNewPropLine
       ) {
-        unfoldedLines[unfoldedLines.length - 1] =
-          unfoldedLines[unfoldedLines.length - 1].slice(0, -1) + line.trim();
+        unfoldedLines[unfoldedLines.length - 1] = prevLine.slice(0, -1) + trimmed;
+      } else if (unfoldedLines.length > 0 && (line.startsWith(' ') || line.startsWith('\t'))) {
+        unfoldedLines[unfoldedLines.length - 1] += line.slice(1);
+      } else if (unfoldedLines.length > 0 && !isNewPropLine && !trimmed.includes(':')) {
+        // Android vCard 2.1 多行 Base64 PHOTO 或未縮排長行自動接續
+        unfoldedLines[unfoldedLines.length - 1] += trimmed;
       } else {
-        unfoldedLines.push(line.trim());
+        unfoldedLines.push(trimmed);
       }
     }
 
@@ -211,6 +259,7 @@ export function importFromVCard(vcfString: string): ContactCard[] {
     let department = '';
     let jobTitle = '';
     let taxId = '';
+    let ribbon: ContactCard['ribbon'] = { status: 'none', taskTitle: '' };
     const phones: PhoneItem[] = [];
     const emails: string[] = [];
     const websites: string[] = [];
@@ -249,6 +298,16 @@ export function importFromVCard(vcfString: string): ContactCard[] {
         jobTitle = val;
       } else if (propName === 'X-YNHERE-TAXID' || propName === 'X-TAXID') {
         taxId = val;
+      } else if (propName === 'X-YNHERE-RIBBON') {
+        try {
+          const decodedJson = val.startsWith('{') ? val : decodeURIComponent(val);
+          const parsedRibbon = JSON.parse(decodedJson);
+          if (parsedRibbon && parsedRibbon.status) {
+            ribbon = parsedRibbon;
+          }
+        } catch {
+          // 忽略格式異常的 Ribbon
+        }
       } else if (propName === 'TEL') {
         const isCell =
           propHeader.includes('CELL') ||
@@ -256,10 +315,16 @@ export function importFromVCard(vcfString: string): ContactCard[] {
           propHeader.includes('IPHONE') ||
           /^09\d/.test(val.replace(/[^\d]/g, ''));
         const isFax = propHeader.includes('FAX');
+        const extMatch = rawHeader.match(/X-EXT=([^;:]+)/i);
+        const commaParts = val.split(',');
+        const cleanNumber = commaParts[0].trim();
+        const ext = extMatch ? extMatch[1].trim() : commaParts[1]?.trim();
+
         phones.push({
           type: isCell ? 'mobile' : isFax ? 'fax' : 'work',
-          number: val,
-          normalizedDialString: val,
+          number: cleanNumber,
+          extension: ext || undefined,
+          normalizedDialString: ext ? `${cleanNumber},${ext}` : cleanNumber,
         });
       } else if (propName === 'EMAIL') {
         emails.push(val.toLowerCase());
@@ -274,7 +339,7 @@ export function importFromVCard(vcfString: string): ContactCard[] {
       }
     }
 
-    const finalName = name || fallbackN || '未命名聯絡人';
+    const finalName = name || fallbackN || company || phones[0]?.number || emails[0] || '未命名聯絡人';
 
     contacts.push({
       id: crypto.randomUUID(),
@@ -292,7 +357,7 @@ export function importFromVCard(vcfString: string): ContactCard[] {
       addresses,
       socialLinks: {},
       tags,
-      ribbon: { status: 'none', taskTitle: '' },
+      ribbon,
       timelineNotes: [],
       careerHistory: [],
       isMyDigitalCard: false,

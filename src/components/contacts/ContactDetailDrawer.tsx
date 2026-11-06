@@ -15,8 +15,10 @@ import {
   Sparkles,
   Upload,
   RotateCw,
+  ZoomIn,
 } from 'lucide-react';
 import { ContactCard, RibbonTask, TimelineNote } from '../../types/contact';
+import { CardImageLightbox } from '../common/CardImageLightbox';
 import { exportRibbonToIcs } from '../../services/exchange/calendarIcs';
 import { detectAndCropCards } from '../../services/cv/cardDetector';
 import {
@@ -53,6 +55,7 @@ export const ContactDetailDrawer: React.FC<ContactDetailDrawerProps> = ({
   const [newNote, setNewNote] = useState('');
   const [noteCategory, setNoteCategory] = useState<TimelineNote['category']>('visit');
   const [isReRecognizing, setIsReRecognizing] = useState(false);
+  const [isImageZoomOpen, setIsImageZoomOpen] = useState(false);
   const [ocrSettings, setOcrSettings] = useState<OcrSettings>(() => getOcrSettings());
   const reUploadInputRef = useRef<HTMLInputElement>(null);
 
@@ -263,7 +266,15 @@ export const ContactDetailDrawer: React.FC<ContactDetailDrawerProps> = ({
         {/* 頂部 Header */}
         <div className="sticky top-0 bg-white/95 backdrop-blur-md px-6 py-4 border-b border-slate-200 flex items-center justify-between z-10 shadow-xs">
           <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center font-bold text-slate-600 border border-slate-200">
+            <div
+              onClick={() => {
+                if (form.thumbnailDataUrl || form.frontImageId) setIsImageZoomOpen(true);
+              }}
+              className={`w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center font-bold text-slate-600 border border-slate-200 ${
+                form.thumbnailDataUrl || form.frontImageId ? 'cursor-zoom-in hover:ring-2 hover:ring-blue-500' : ''
+              }`}
+              title={form.thumbnailDataUrl || form.frontImageId ? '點擊放大檢視名片照片' : undefined}
+            >
               {form.thumbnailDataUrl ? (
                 <img src={form.thumbnailDataUrl} alt={form.name} className="w-full h-full object-cover rounded-xl" />
               ) : (
@@ -431,13 +442,25 @@ export const ContactDetailDrawer: React.FC<ContactDetailDrawerProps> = ({
               )}
             </div>
 
-            {form.thumbnailDataUrl && (
-              <div className="rounded-xl overflow-hidden border border-slate-200 bg-white max-h-52 flex items-center justify-center">
-                <img
-                  src={form.thumbnailDataUrl}
-                  alt={form.name}
-                  className="max-h-52 w-auto object-contain"
-                />
+            {(form.thumbnailDataUrl || form.frontImageId) && (
+              <div className="space-y-1.5">
+                <div
+                  onClick={() => setIsImageZoomOpen(true)}
+                  className="relative group cursor-zoom-in rounded-xl overflow-hidden border border-slate-200 bg-white max-h-60 flex items-center justify-center hover:border-blue-400 transition-all"
+                  title="點擊放大檢視名片照片"
+                >
+                  {form.thumbnailDataUrl && (
+                    <img
+                      src={form.thumbnailDataUrl}
+                      alt={form.name}
+                      className="max-h-60 w-auto object-contain"
+                    />
+                  )}
+                  <div className="absolute bottom-2 right-2 bg-slate-900/80 backdrop-blur-xs text-white px-3 py-1.5 rounded-xl text-[11px] font-bold flex items-center space-x-1 shadow-md">
+                    <ZoomIn className="w-3.5 h-3.5 text-blue-300" />
+                    <span>點擊全螢幕放大 / 雙指縮放</span>
+                  </div>
+                </div>
               </div>
             )}
           </div>
@@ -850,6 +873,15 @@ export const ContactDetailDrawer: React.FC<ContactDetailDrawerProps> = ({
           </div>
         </div>
       </div>
+
+      {/* 名片照片全螢幕放大檢視器 */}
+      <CardImageLightbox
+        isOpen={isImageZoomOpen}
+        onClose={() => setIsImageZoomOpen(false)}
+        imageId={form.frontImageId}
+        fallbackDataUrl={form.thumbnailDataUrl}
+        title={`${form.name} — 名片照片`}
+      />
     </div>
   );
 };

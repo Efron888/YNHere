@@ -55,12 +55,32 @@ describe('vCard 3.0 編解碼器 (vcardCodec)', () => {
     expect(imported[0].emails).toContain('david.wang@microsoft.com');
   });
 
-  it('多張名片勾選或全選應合併於單一 vcf 檔案中', () => {
-    const c1 = createDummyContact({ name: '聯絡人A' });
-    const c2 = createDummyContact({ name: '聯絡人B' });
-    const vcf = exportToVCard([c1, c2]);
+  it('多張名片勾選或全選應合併於單一 vcf 檔案中，且不含未跳脫之 JSON 冒號或電話逗號以防手機通訊錄只導入 1 人', () => {
+    const c1 = createDummyContact({
+      name: '劉景文',
+      ribbon: { status: 'none', taskTitle: '' },
+    });
+    const c2 = createDummyContact({
+      name: '李小華',
+      ribbon: { status: 'in_progress', taskTitle: '寄送報價單: 確認規格', dueDate: '2026-11-10T14:00:00.000Z' },
+    });
+    const c3 = createDummyContact({
+      name: '蔡金波',
+    });
+    const vcf = exportToVCard([c1, c2, c3]);
+    // 確保 X-YNHERE-RIBBON 已進行 URI 安全編碼，不含原始 JSON 的 {"status":
+    expect(vcf).not.toContain('X-YNHERE-RIBBON:{"');
+    // 確保 TEL 行不含逗號 ,101，分機改由 X-EXT 標記
+    expect(vcf).toContain('X-EXT=101:02-2345-6789');
+
     const imported = importFromVCard(vcf);
-    expect(imported.length).toBe(2);
+    expect(imported.length).toBe(3);
+    expect(imported[0].name).toBe('劉景文');
+    expect(imported[1].name).toBe('李小華');
+    expect(imported[1].ribbon.status).toBe('in_progress');
+    expect(imported[1].ribbon.taskTitle).toBe('寄送報價單: 確認規格');
+    expect(imported[2].name).toBe('蔡金波');
+    expect(imported[0].phones.find((p) => p.type === 'work')?.extension).toBe('101');
   });
 
   it('應能正確匯入 Android (vCard 2.1 Quoted-Printable 軟換行) 與 iOS (item1.TEL 群組前綴) 的多人通訊錄 .vcf 檔', () => {

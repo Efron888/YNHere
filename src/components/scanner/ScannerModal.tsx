@@ -14,8 +14,10 @@ import {
   Building2,
   Trash2,
   GitMerge,
+  ZoomIn,
 } from 'lucide-react';
 import { detectAndCropCards } from '../../services/cv/cardDetector';
+import { CardImageLightbox } from '../common/CardImageLightbox';
 import {
   recognizeBusinessCardsFromImage,
   getOcrSettings,
@@ -32,8 +34,9 @@ interface ScannerModalProps {
   isOpen: boolean;
   onClose: () => void;
   existingContacts: ContactCard[];
-  onSaveNewContact: (contact: ContactCard) => void;
-  onMergeContact: (updated: ContactCard) => void;
+  onSaveNewContact: (contact: ContactCard) => Promise<void> | void;
+  onMergeContact: (updated: ContactCard) => Promise<void> | void;
+  onBatchSaveContacts?: (cards: ContactCard[]) => Promise<void> | void;
   onOpenSettings?: () => void;
 }
 
@@ -43,6 +46,7 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
   existingContacts,
   onSaveNewContact,
   onMergeContact,
+  onBatchSaveContacts,
   onOpenSettings,
 }) => {
   const [mode, setMode] = useState<'single' | 'continuous' | 'multi'>('single');
@@ -53,6 +57,7 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
   const [duplicateMap, setDuplicateMap] = useState<Record<string, ContactCard>>({});
   const [ocrSettings, setOcrSettings] = useState<OcrSettings>(() => getOcrSettings());
   const [showEngineConfig, setShowEngineConfig] = useState(false);
+  const [zoomTarget, setZoomTarget] = useState<ContactCard | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
@@ -203,14 +208,18 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
   };
 
   // 一鍵收錄全部（若有重複名片自動智慧合併，絕不產生 2 張重複名片！）
-  const handleSaveOrMergeAll = () => {
-    for (const card of previewCards) {
-      const matchedExist = duplicateMap[card.id] || findMatchingExisting(card);
-      if (matchedExist) {
-        const merged = mergeContacts(matchedExist, card);
-        onMergeContact(merged);
-      } else {
-        onSaveNewContact(card);
+  const handleSaveOrMergeAll = async () => {
+    if (onBatchSaveContacts) {
+      await onBatchSaveContacts(previewCards);
+    } else {
+      for (const card of previewCards) {
+        const matchedExist = duplicateMap[card.id] || findMatchingExisting(card);
+        if (matchedExist) {
+          const merged = mergeContacts(matchedExist, card);
+          await onMergeContact(merged);
+        } else {
+          await onSaveNewContact(card);
+        }
       }
     }
     setPreviewCards([]);
@@ -525,9 +534,22 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
                       }`}
                     >
                       <div className="flex items-start space-x-3 min-w-0 flex-1">
-                        <div className="w-14 h-10 rounded-lg bg-blue-100 text-blue-700 font-bold flex items-center justify-center flex-shrink-0 overflow-hidden border border-slate-200">
+                        <div
+                          onClick={() => {
+                            if (card.thumbnailDataUrl || card.frontImageId) setZoomTarget(card);
+                          }}
+                          className={`relative w-14 h-10 rounded-lg bg-blue-100 text-blue-700 font-bold flex items-center justify-center flex-shrink-0 overflow-hidden border border-slate-200 ${
+                            card.thumbnailDataUrl || card.frontImageId ? 'cursor-zoom-in hover:ring-2 hover:ring-blue-500' : ''
+                          }`}
+                          title="點擊放大檢視名片照片"
+                        >
                           {card.thumbnailDataUrl ? (
-                            <img src={card.thumbnailDataUrl} alt={card.name} className="w-full h-full object-cover" />
+                            <>
+                              <img src={card.thumbnailDataUrl} alt={card.name} className="w-full h-full object-cover" />
+                              <div className="absolute bottom-0 right-0 bg-slate-900/75 text-white p-0.5 rounded-tl">
+                                <ZoomIn className="w-2.5 h-2.5" />
+                              </div>
+                            </>
                           ) : (
                             card.name.slice(0, 1)
                           )}
@@ -627,6 +649,15 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
           )}
         </div>
       </div>
+
+      {/* 掃描預覽名片放大檢視器 */}
+      <CardImageLightbox
+        isOpen={Boolean(zoomTarget)}
+        onClose={() => setZoomTarget(null)}
+        imageId={zoomTarget?.frontImageId}
+        fallbackDataUrl={zoomTarget?.thumbnailDataUrl}
+        title={`${zoomTarget?.name || '名片'} — 掃描原圖`}
+      />
     </div>
   );
 };

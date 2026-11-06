@@ -1,6 +1,7 @@
-import React, { useRef } from 'react';
-import { Phone, Mail, Share2, Building2, Briefcase, Check } from 'lucide-react';
+import React, { useRef, useState } from 'react';
+import { Phone, Mail, Share2, Building2, Briefcase, Check, ZoomIn } from 'lucide-react';
 import { ContactCard } from '../../types/contact';
+import { CardImageLightbox } from '../common/CardImageLightbox';
 
 interface ContactCardItemProps {
   contact: ContactCard;
@@ -30,6 +31,7 @@ export const ContactCardItem: React.FC<ContactCardItemProps> = ({
   const primaryPhone = contact.phones.find((p) => p.type === 'mobile') || contact.phones[0];
   const primaryEmail = contact.emails[0];
   const ribbonInfo = contact.ribbon?.status !== 'none' ? RIBBON_COLOR_MAP[contact.ribbon.status] : null;
+  const [isZoomOpen, setIsZoomOpen] = useState(false);
 
   // 手機長按進入選取模式支援
   const longPressTimer = useRef<NodeJS.Timeout | null>(null);
@@ -127,10 +129,26 @@ export const ContactCardItem: React.FC<ContactCardItemProps> = ({
           </div>
         </button>
 
-        {/* 頭像或名片縮圖 */}
-        <div className="w-12 h-12 rounded-xl bg-slate-100 border border-slate-200 overflow-hidden flex-shrink-0 flex items-center justify-center text-slate-600 font-bold text-lg">
+        {/* 頭像或名片縮圖 (若有照片支援直接點擊全螢幕放大) */}
+        <div
+          onClick={(e) => {
+            if (contact.thumbnailDataUrl || contact.frontImageId) {
+              e.stopPropagation();
+              setIsZoomOpen(true);
+            }
+          }}
+          className={`relative w-12 h-12 rounded-xl bg-slate-100 border border-slate-200 overflow-hidden flex-shrink-0 flex items-center justify-center text-slate-600 font-bold text-lg ${
+            contact.thumbnailDataUrl || contact.frontImageId ? 'cursor-zoom-in ring-offset-1 hover:ring-2 hover:ring-blue-500' : ''
+          }`}
+          title={contact.thumbnailDataUrl || contact.frontImageId ? '點擊放大名片照片' : undefined}
+        >
           {contact.thumbnailDataUrl ? (
-            <img src={contact.thumbnailDataUrl} alt={contact.name} className="w-full h-full object-cover" />
+            <>
+              <img src={contact.thumbnailDataUrl} alt={contact.name} className="w-full h-full object-cover" />
+              <div className="absolute bottom-0 right-0 bg-slate-900/75 text-white p-0.5 rounded-tl-md">
+                <ZoomIn className="w-2.5 h-2.5" />
+              </div>
+            </>
           ) : (
             contact.name.slice(0, 1)
           )}
@@ -191,6 +209,18 @@ export const ContactCardItem: React.FC<ContactCardItemProps> = ({
           </span>
         )}
       </div>
+
+      {isZoomOpen && (
+        <div onClick={(e) => e.stopPropagation()}>
+          <CardImageLightbox
+            isOpen={isZoomOpen}
+            onClose={() => setIsZoomOpen(false)}
+            imageId={contact.frontImageId}
+            fallbackDataUrl={contact.thumbnailDataUrl}
+            title={`${contact.name} — 名片照片`}
+          />
+        </div>
+      )}
     </div>
   );
 };

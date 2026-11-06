@@ -307,11 +307,43 @@ export function App() {
     await loadContactsFromDb();
   };
 
-  // 批次匯入成功
+  // 掃描器批次收錄全部 (單一原子交易處理多張名片新增與同名合併，杜絕非同步迴圈競爭只存到 1 人的問題)
+  const handleBatchSaveFromScanner = async (cards: ContactCard[]) => {
+    if (!cards || cards.length === 0) return;
+    const allInDb = await db.contacts.toArray();
+    const workingList = allInDb.filter((c) => !c.isMyDigitalCard && c.id !== 'my-standalone-profile-card');
+
+    for (const incoming of cards) {
+      if (incoming.isMyDigitalCard || incoming.id === 'my-standalone-profile-card') continue;
+      const matchIdx = workingList.findIndex((exist) => {
+        if (exist.id === incoming.id) return true;
+        const sameRealName =
+          incoming.name &&
+          incoming.name !== '未命名聯絡人' &&
+          exist.name.trim() === incoming.name.trim();
+        const score = calculateDuplicateScore(exist, incoming);
+        return score >= 0.75 || Boolean(sameRealName);
+      });
+
+      if (matchIdx !== -1) {
+        workingList[matchIdx] = mergeContacts(workingList[matchIdx], incoming);
+      } else {
+        workingList.push(incoming);
+        incrementUnbackedCount(workingList.length);
+      }
+    }
+
+    await db.contacts.bulkPut(workingList);
+    await loadContactsFromDb();
+  };
+
+  // 批次匯入成功 (單一原子交易 bulkPut 確保手機多選聯絡人 100% 全數寫入)
   const handleImportSuccess = async (imported: ContactCard[]) => {
-    for (const c of imported) {
-      await db.contacts.put(c);
-      incrementUnbackedCount();
+    if (!imported || imported.length === 0) return;
+    await db.contacts.bulkPut(imported);
+    const total = await db.contacts.count();
+    for (let i = 0; i < imported.length; i++) {
+      incrementUnbackedCount(total);
     }
     await loadContactsFromDb();
   };
@@ -765,6 +797,7 @@ export function App() {
         existingContacts={contacts}
         onSaveNewContact={handleSaveContact}
         onMergeContact={handleMergeAndDeduplicateContact}
+        onBatchSaveContacts={handleBatchSaveFromScanner}
         onOpenSettings={() => setIsSettingsOpen(true)}
       />
 

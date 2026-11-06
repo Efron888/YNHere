@@ -26,7 +26,7 @@ interface ExchangeModalProps {
   onClose: () => void;
   allContacts: ContactCard[];
   selectedContacts: ContactCard[];
-  onImportSuccess: (imported: ContactCard[]) => void;
+  onImportSuccess: (imported: ContactCard[]) => Promise<void> | void;
 }
 
 export const ExchangeModal: React.FC<ExchangeModalProps> = ({
@@ -76,7 +76,37 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
   const chosenContacts = allContacts.filter((c) => internalSelectedIds.has(c.id));
   const targets = exportScope === 'selected' && chosenContacts.length > 0 ? chosenContacts : allContacts;
 
-  // 1. 匯出 vCard (.vcf) — 支援多筆聯絡人一次匯入 iPhone / Android
+  // 1A. 透過系統原生分享將多筆 .vcf 直接導入手機「通訊錄」App (解決 iOS Safari 預覽器只導入第 1 人的限制)
+  const handleShareVcfToPhone = async () => {
+    if (targets.length === 0) {
+      alert('目前沒有可匯出的聯絡人！');
+      return;
+    }
+    const vcf = exportToVCard(targets);
+    const fileName = `contacts-${targets.length}.vcf`;
+
+    try {
+      const file = new File([vcf], fileName, { type: 'text/vcard;charset=utf-8' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: `匯入 ${targets.length} 位聯絡人至通訊錄`,
+          text: `請於選單中點選「通訊錄 (Contacts)」即可一次導入全部 ${targets.length} 位聯絡人`,
+        });
+        resetUnbackedCount(allContacts.length);
+        return;
+      }
+    } catch (err) {
+      // 若使用者取消分享則不強制下載；若不支援則自動改用標準檔案下載
+      if (err instanceof Error && err.name === 'AbortError') {
+        return;
+      }
+    }
+
+    handleExportVcf();
+  };
+
+  // 1B. 下載 vCard (.vcf) 檔案
   const handleExportVcf = () => {
     if (targets.length === 0) {
       alert('目前沒有可匯出的聯絡人！');
@@ -88,8 +118,10 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
     const a = document.createElement('a');
     a.href = url;
     a.download = `contacts-${targets.length}.vcf`;
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
     resetUnbackedCount(allContacts.length);
   };
 
@@ -116,14 +148,16 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
       }
     }
 
-    const zipBytes = exportToYnpack(targets, imagesMap);
+    const zipBytes = await exportToYnpack(targets, imagesMap);
     const blob = new Blob([zipBytes as unknown as BlobPart], { type: 'application/zip' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
     a.download = `ynhere-backup-${targets.length}.ynpack`;
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
     resetUnbackedCount(allContacts.length);
   };
 
@@ -139,15 +173,18 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
     const a = document.createElement('a');
     a.href = url;
     a.download = `contacts-${targets.length}.csv`;
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
     resetUnbackedCount(allContacts.length);
   };
 
-  // 4A. 原生手機通訊錄多選導入 (Android Chrome Contact Picker API)
+  // 4A. 原生手機通訊錄多選導入 (Android Chrome Contact Picker API + 自動檔案備援)
   const handleNativeContactPicker = async () => {
     const nav = navigator as Navigator & {
       contacts?: {
+        getProperties?: () => Promise<string[]>;
         select: (
           properties: string[],
           options?: { multiple?: boolean }
@@ -164,10 +201,24 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
 
     if (nav.contacts && typeof nav.contacts.select === 'function') {
       try {
-        const picked = await nav.contacts.select(['name', 'tel', 'email', 'address'], { multiple: true });
+        let propsToRequest = ['name', 'tel', 'email'];
+        if (typeof nav.contacts.getProperties === 'function') {
+          try {
+            const supported = await nav.contacts.getProperties();
+            const desired = ['name', 'tel', 'email', 'address'];
+            const filtered = desired.filter((p) => supported.includes(p));
+            if (filtered.length > 0) {
+              propsToRequest = filtered;
+            }
+          } catch {
+            // 使用基礎安全屬性 ['name', 'tel', 'email']
+          }
+        }
+
+        const picked = await nav.contacts.select(propsToRequest, { multiple: true });
         if (!picked || picked.length === 0) return;
 
-        const imported: ContactCard[] = picked.map((item) => {
+        const imported: ContactCard[] = picked.map((item, idx) => {
           const phones: PhoneItem[] = (item.tel || [])
             .map((t) => String(t).trim())
             .filter(Boolean)
@@ -182,11 +233,20 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
             .map((a) => (a.addressLine || []).join(' ').trim())
             .filter(Boolean);
 
+          const fullName =
+            (item.name || [])
+              .map((n) => String(n).trim())
+              .filter(Boolean)
+              .join(' ') ||
+            phones[0]?.number ||
+            emails[0] ||
+            `手機聯絡人 ${idx + 1}`;
+
           return {
             id: crypto.randomUUID(),
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
-            name: item.name?.[0]?.trim() || '未命名聯絡人',
+            name: fullName,
             nameEn: '',
             company: '',
             department: '',
@@ -205,46 +265,53 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
           };
         });
 
-        onImportSuccess(imported);
-        alert(`成功自手機通訊錄多選導入 ${imported.length} 位聯絡人！`);
+        await onImportSuccess(imported);
+        alert(`✅ 成功自手機通訊錄多選導入 ${imported.length} 位聯絡人！`);
         onClose();
+        return;
       } catch (err) {
-        console.warn('原生通訊錄選取取消或失敗，改用檔案匯入:', err);
+        if (err instanceof Error && err.name === 'AbortError') {
+          return;
+        }
+        console.warn('原生通訊錄選取失敗，自動改用 .vcf 檔案匯入:', err);
       }
-    } else {
-      vcfInputRef.current?.click();
     }
+
+    vcfInputRef.current?.click();
   };
 
   // 4B. 匯入 vCard (.vcf) — 支援多檔選取與單檔多筆聯絡人
   const handleImportVcf = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
+    const fileList = Array.from(files);
+    e.target.value = '';
 
     const allImported: ContactCard[] = [];
-    for (const file of Array.from(files)) {
+    for (const file of fileList) {
       const text = await file.text();
       const parsed = importFromVCard(text);
       allImported.push(...parsed);
     }
 
-    e.target.value = '';
     if (allImported.length === 0) {
       alert('未在所選 .vcf 檔案中偵測到有效聯絡人！');
       return;
     }
 
-    onImportSuccess(allImported);
-    alert(`成功自 vCard 匯入 ${allImported.length} 位聯絡人！`);
+    await onImportSuccess(allImported);
+    alert(`✅ 成功自 vCard 匯入 ${allImported.length} 位聯絡人！`);
     onClose();
   };
 
   const handleImportYnpack = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
+    const fileList = Array.from(files);
+    e.target.value = '';
 
     const allImported: ContactCard[] = [];
-    for (const file of Array.from(files)) {
+    for (const file of fileList) {
       const arrayBuffer = await file.arrayBuffer();
       const bytes = new Uint8Array(arrayBuffer);
       const { contacts, images } = await importFromYnpack(bytes);
@@ -260,26 +327,26 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
       allImported.push(...contacts);
     }
 
-    e.target.value = '';
-    onImportSuccess(allImported);
-    alert(`成功自 .ynpack 備份檔還原 ${allImported.length} 張名片與圖片！`);
+    await onImportSuccess(allImported);
+    alert(`✅ 成功自 .ynpack 備份檔還原 ${allImported.length} 張名片與圖片！`);
     onClose();
   };
 
   const handleImportCsv = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
+    const fileList = Array.from(files);
+    e.target.value = '';
 
     const allImported: ContactCard[] = [];
-    for (const file of Array.from(files)) {
+    for (const file of fileList) {
       const text = await file.text();
       const imported = parseCsvToContacts(text);
       allImported.push(...imported);
     }
 
-    e.target.value = '';
-    onImportSuccess(allImported);
-    alert(`成功自表格匯入 ${allImported.length} 筆聯絡人！`);
+    await onImportSuccess(allImported);
+    alert(`✅ 成功自表格匯入 ${allImported.length} 筆聯絡人！`);
     onClose();
   };
 
@@ -342,7 +409,7 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
                 activeTab === 'export' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'
               }`}
             >
-              匯出 ({targets.length})
+              導入至手機 ({targets.length})
             </button>
             <button
               type="button"
@@ -351,7 +418,7 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
                 activeTab === 'import' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'
               }`}
             >
-              匯入多筆聯絡人
+              從手機匯入名片
             </button>
             <button
               type="button"
@@ -445,23 +512,47 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
             </div>
           )}
 
-          {/* 分頁 1: 匯出 */}
+          {/* 分頁 1: 匯出 / 導入至手機通訊錄 */}
           {activeTab === 'export' && (
             <div className="space-y-2.5">
+              {/* 手機原生分享直通通訊錄 (解決 iOS Safari 預覽 .vcf 只導入 1 人的限制) */}
+              <button
+                type="button"
+                onClick={handleShareVcfToPhone}
+                className="w-full p-4 rounded-2xl border-2 border-blue-400 hover:border-blue-600 bg-blue-50/70 hover:bg-blue-100/60 flex items-center justify-between transition-all group shadow-xs"
+              >
+                <div className="flex items-center space-x-3 text-left">
+                  <div className="p-2.5 rounded-xl bg-blue-600 text-white shadow-sm group-hover:scale-105 transition-transform">
+                    <Smartphone className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="font-extrabold text-blue-950 text-sm">
+                      📲 一鍵導入手機通訊錄 (共 {targets.length} 人)
+                    </div>
+                    <div className="text-xs text-blue-700 mt-0.5">
+                      彈出選單後點選「通訊錄 (Contacts)」，即可一次存入全部 {targets.length} 位聯絡人！
+                    </div>
+                  </div>
+                </div>
+                <Share2 className="w-4 h-4 text-blue-600 flex-shrink-0" />
+              </button>
+
               <button
                 type="button"
                 onClick={handleExportVcf}
-                className="w-full p-4 rounded-2xl border border-slate-200 hover:border-blue-400 bg-slate-50/50 hover:bg-blue-50/30 flex items-center justify-between transition-all group"
+                className="w-full p-3.5 rounded-2xl border border-slate-200 hover:border-blue-400 bg-slate-50/50 hover:bg-blue-50/30 flex items-center justify-between transition-all group"
               >
                 <div className="flex items-center space-x-3 text-left">
-                  <div className="p-2.5 rounded-xl bg-white text-blue-600 shadow-sm border border-slate-200 group-hover:scale-105 transition-transform">
+                  <div className="p-2 rounded-xl bg-white text-blue-600 shadow-sm border border-slate-200">
                     <Contact className="w-5 h-5" />
                   </div>
                   <div>
                     <div className="font-bold text-slate-900 text-sm">
-                      匯出至手機通訊錄 (.vcf，共 {targets.length} 人)
+                      下載 .vcf 通訊錄檔案 (共 {targets.length} 人)
                     </div>
-                    <div className="text-xs text-slate-500">直通 iPhone / Android / Google 通訊錄一次導入多人</div>
+                    <div className="text-[11px] text-slate-500">
+                      若手機瀏覽器預覽只顯示第 1 人，請點預覽畫面右上角「分享 ➔ 通訊錄」即可全部導入
+                    </div>
                   </div>
                 </div>
                 <Download className="w-4 h-4 text-slate-400 group-hover:text-blue-600 flex-shrink-0" />
@@ -470,17 +561,17 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
               <button
                 type="button"
                 onClick={handleExportYnpack}
-                className="w-full p-4 rounded-2xl border border-slate-200 hover:border-blue-400 bg-slate-50/50 hover:bg-blue-50/30 flex items-center justify-between transition-all group"
+                className="w-full p-3.5 rounded-2xl border border-slate-200 hover:border-blue-400 bg-slate-50/50 hover:bg-blue-50/30 flex items-center justify-between transition-all group"
               >
                 <div className="flex items-center space-x-3 text-left">
-                  <div className="p-2.5 rounded-xl bg-white text-indigo-600 shadow-sm border border-slate-200 group-hover:scale-105 transition-transform">
+                  <div className="p-2 rounded-xl bg-white text-indigo-600 shadow-sm border border-slate-200">
                     <FileArchive className="w-5 h-5" />
                   </div>
                   <div>
                     <div className="font-bold text-slate-900 text-sm">
                       YNHere 完整封裝包 (.ynpack，共 {targets.length} 人)
                     </div>
-                    <div className="text-xs text-slate-500">包含完整圖文、時間軸備註、絲帶與職涯歷史 (ZIP)</div>
+                    <div className="text-[11px] text-slate-500">包含完整圖文、時間軸備註、絲帶與職涯歷史 (ZIP)</div>
                   </div>
                 </div>
                 <Download className="w-4 h-4 text-slate-400 group-hover:text-indigo-600 flex-shrink-0" />
@@ -489,17 +580,17 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
               <button
                 type="button"
                 onClick={handleExportCsv}
-                className="w-full p-4 rounded-2xl border border-slate-200 hover:border-blue-400 bg-slate-50/50 hover:bg-blue-50/30 flex items-center justify-between transition-all group"
+                className="w-full p-3.5 rounded-2xl border border-slate-200 hover:border-blue-400 bg-slate-50/50 hover:bg-blue-50/30 flex items-center justify-between transition-all group"
               >
                 <div className="flex items-center space-x-3 text-left">
-                  <div className="p-2.5 rounded-xl bg-white text-indigo-700 shadow-sm border border-slate-200 group-hover:scale-105 transition-transform">
+                  <div className="p-2 rounded-xl bg-white text-indigo-700 shadow-sm border border-slate-200">
                     <FileSpreadsheet className="w-5 h-5" />
                   </div>
                   <div>
                     <div className="font-bold text-slate-900 text-sm">
                       Excel 報表 (.csv，共 {targets.length} 人)
                     </div>
-                    <div className="text-xs text-slate-500">內建 UTF-8 BOM 與統編前導 0 保護，Excel 不亂碼</div>
+                    <div className="text-[11px] text-slate-500">內建 UTF-8 BOM 與統編前導 0 保護，Excel 不亂碼</div>
                   </div>
                 </div>
                 <Download className="w-4 h-4 text-slate-400 group-hover:text-indigo-700 flex-shrink-0" />
@@ -548,7 +639,7 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
               <input
                 ref={vcfInputRef}
                 type="file"
-                accept=".vcf,text/vcard,text/x-vcard"
+                accept=".vcf,text/vcard,text/x-vcard,text/directory,*/*"
                 multiple
                 onChange={handleImportVcf}
                 className="hidden"
@@ -598,7 +689,7 @@ export const ExchangeModal: React.FC<ExchangeModalProps> = ({
               <input
                 ref={csvInputRef}
                 type="file"
-                accept=".csv"
+                accept=".csv,text/csv"
                 multiple
                 onChange={handleImportCsv}
                 className="hidden"
